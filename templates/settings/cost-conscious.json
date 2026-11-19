@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+
+  "_comment": [
+    "COST-CONSCIOUS SETTINGS - Aggressive cost savings profile.",
+    "Defaults to Haiku for most tasks. Restricts expensive operations.",
+    "\"haiku\" is Haiku 5.5 on the Anthropic API (Claude Code v2.1.293+): $0.10/$0.50 up to 100K prompt tokens, $0.50/$2.50 above, priced per request -- keep sessions short so prompts stay under 100K.",
+    "On Claude Platform on AWS, Bedrock, Google Cloud (Google managed, formerly Vertex AI) and Foundry \"haiku\" is legacy Haiku 4.5 ($1/$5, 200K) -- set ANTHROPIC_DEFAULT_HAIKU_MODEL to pin it.",
+    "Best for: solo devs on tight budgets, routine maintenance, simple tasks.",
+    "Trade-off: lower quality on complex reasoning, more turns for hard problems.",
+    "Read(...) deny rules keep Claude's file tools out of deps, build output and secrets (.claudeignore is not a Claude Code feature).",
+    "modelSettings sets Haiku 5.5's auto-compact window to 100,000 tokens, the lowest allowed, so compaction fires near its 100K price line (v2.1.288+). It is not a cap: whether compaction fires just under or at 100K is not documented, one request after a large tool result can still cross the line and bill 5x on the whole request, and each compaction is itself a request. The entry matches only Haiku 5.5, so where \"haiku\" resolves to Haiku 4.5 it does nothing (https://code.claude.com/docs/en/settings-reference#modelsettings, read 2026-11-03).",
+    "env: CLAUDE_CODE_MAX_TURNS caps the number of agentic turns when no limit is passed; the docs call it equivalent to --max-turns, which the CLI reference lists as print mode only (claude -p), and do not describe it as limiting interactive sessions (https://code.claude.com/docs/en/env-vars and https://code.claude.com/docs/en/cli-reference, read 2026-11-01).",
+    "Copy this file to ~/.claude/settings.json or .claude/settings.json"
+  ],
+
+  "model": "haiku",
+
+  "modelSettings": {
+    "claude-haiku-5-5": {
+      "autoCompactWindow": 100000
+    }
+  },
+
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(npm test*)",
+      "Bash(npm run lint*)",
+      "Bash(npm run build*)"
+    ],
+    "deny": [
+      "Read(./node_modules/**)",
+      "Read(./dist/**)",
+      "Read(./build/**)",
+      "Read(./coverage/**)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(*.min.js)",
+      "Read(./package-lock.json)",
+      "WebFetch",
+      "Bash(npm install*)",
+      "Bash(npx*)",
+      "Bash(pip install*)",
+      "Bash(rm -rf*)",
+      "Bash(git push --force*)",
+      "Bash(curl*)",
+      "Bash(wget*)"
+    ]
+  },
+
+  "env": {
+    "CLAUDE_CODE_MAX_TURNS": "15"
+  }
+}

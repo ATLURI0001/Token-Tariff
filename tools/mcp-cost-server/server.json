@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ATLURI0001/cost-estimator",
+  "title": "Claude Cost Estimator",
+  "description": "Cache-aware Claude Code cost estimates: price a text, a whole session, or compare every model.",
+  "repository": {
+    "url": "https://github.com/ATLURI0001/token-tariff",
+    "source": "github",
+    "subfolder": "tools/mcp-cost-server"
+  },
+  "websiteUrl": "https://atluri0001.github.io/token-tariff/",
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@atluri0001/mcp-cost-server",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "cost-mode",
+  "version": "1.20.0",
+  "description": "Cost-conscious mode for Claude Code. Cuts filler, suggests cheaper models, encourages efficient patterns.",
+  "author": {
+    "name": "Ram Prasad Atluri",
+    "url": "https://github.com/ATLURI0001"
+  },
+  "homepage": "https://github.com/ATLURI0001/token-tariff",
+  "repository": "https://github.com/ATLURI0001/token-tariff",
+  "license": "MIT",
+  "keywords": ["cost-optimization", "tokens", "budget", "productivity", "brevity"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Cost Mode",
+    "shortDescription": "Concise answers and cheaper-model routing for Claude Code.",
+    "longDescription": "Cost-conscious mode that enforces concise responses, suggests cheaper models for simple tasks, and encourages efficient workflow patterns. Three intensity levels: lite, standard, strict.",
+    "developerName": "Ram Prasad Atluri",
+    "category": "Productivity",
+    "capabilities": ["Write", "Code", "Analyze"],
+    "websiteURL": "https://atluri0001.github.io/token-tariff/",
+    "defaultPrompt": ["Enable cost-conscious mode. Reduce token usage while keeping technical accuracy."],
+    "brandColor": "#3fb950"
+  }
+}

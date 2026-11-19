@@ -1,0 +1,36 @@
+{
+  "name": "@atluri0001/claude-rate",
+  "version": "0.4.1",
+  "description": "Rate the cost-efficiency of a Claude / AI setup in a local project directory.",
+  "bin": {
+    "claude-rate": "./bin/claude-rate.js"
+  },
+  "files": [
+    "bin/",
+    "rate.py",
+    "README.md"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "ai",
+    "cost",
+    "audit",
+    "rate",
+    "optimization"
+  ],
+  "homepage": "https://github.com/ATLURI0001/token-tariff/tree/main/tools/claude-rate",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ATLURI0001/token-tariff.git",
+    "directory": "tools/claude-rate"
+  },
+  "bugs": {
+    "url": "https://github.com/ATLURI0001/token-tariff/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  }
+}

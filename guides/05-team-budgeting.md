@@ -1,0 +1,888 @@
+# Guide 05: Team Budgeting
+
+> **Claude Code costs scale linearly with team size -- unless you manage them.** Anthropic's enterprise average is about $150-250 per developer per month, so a team of 5 averages about $750-1,250 a month (computed: 5 x $150 and 5 x $250). This guide's cache-aware model prices the [example team of 5](#example-team-of-5) at $233 a month with model routing and $552 with every task on Opus 5.5.
+
+**Anthropic's own benchmark** ([code.claude.com/docs/en/costs](https://code.claude.com/docs/en/costs), read 2026-11-01): "Across enterprise deployments, the average cost is around $13 per developer per active day and $150-250 per developer per month, with costs remaining below $30 per active day for 90% of users." Use that as the outside check on any budget below. This guide's modelled figures sit well under it because the model's task counts and context sizes are illustrative, so follow Anthropic's advice and start with a small pilot group to establish your own baseline.
+
+Individual optimization matters, but team-level cost management is where the real financial discipline happens. This guide covers budgets, tracking, ROI analysis, and scaling strategies for teams of all sizes.
+
+---
+
+## Table of Contents
+
+- [Setting Per-Developer Monthly Budgets](#setting-per-developer-monthly-budgets)
+- [Monthly Cost Estimation Formula](#monthly-cost-estimation-formula)
+- [Tracking Usage Across Team Members](#tracking-usage-across-team-members)
+  - [OpenTelemetry Recipe](#opentelemetry-recipe)
+  - [Reconcile the Estimate Against the Bill](#reconcile-the-estimate-against-the-bill)
+- [Claude Code vs Claude API vs Manual Coding](#claude-code-vs-claude-api-vs-manual-coding)
+- [ROI Calculation Template](#roi-calculation-template)
+- [Cost Allocation by Project and Task Type](#cost-allocation-by-project-and-task-type)
+- [Scaling Strategies as Your Team Grows](#scaling-strategies-as-your-team-grows)
+- [Onboarding New Team Members Cost-Efficiently](#onboarding-new-team-members-cost-efficiently)
+- [Budget Alert Systems](#budget-alert-systems)
+- [Monthly Budget Review Process](#monthly-budget-review-process)
+
+---
+
+## Setting Per-Developer Monthly Budgets
+
+### Why Per-Developer Budgets Work
+
+A shared team budget creates a tragedy of the commons: everyone assumes someone else will be careful. Per-developer budgets create individual accountability without micromanaging how each person uses the tool.
+
+### Budget Tiers by Role
+
+Not every developer uses Claude Code the same way. Set budgets based on role and typical usage:
+
+| Role | Typical Usage | Illustrative Day (simple / medium / complex tasks) | Modelled Monthly Cost | Starting Budget (x1.2) | Rationale |
+|------|---------------|:--------------------------------------------------:|:---------------------:|:----------------------:|-----------|
+| **Junior Developer** | High-frequency simple tasks, learning | 25 / 8 / 1 | $33.26 | $39.92 | Lots of small queries; should use Haiku 5.5 heavily |
+| **Mid-Level Developer** | Mixed task complexity | 20 / 10 / 2 | $48.83 | $58.60 | Component creation, bug fixes, test writing |
+| **Senior Developer** | Lower frequency, higher complexity | 10 / 8 / 4 | $63.94 | $76.73 | Architecture work, complex debugging (Opus 5.5 usage) |
+| **Tech Lead** | Architecture, reviews, planning | 10 / 6 / 5 | $69.10 | $82.92 | Higher Opus 5.5 usage justified for strategic decisions |
+| **DevOps/Platform** | Infrastructure, CI/CD, automation | 20 / 6 / 1 | $27.64 | $33.17 | Mostly config generation, script writing |
+
+> Computed: (simple x $0.0025 + medium x $0.12 + complex x $0.48) x 22 working days, with the task costs from the [estimation formula](#monthly-cost-estimation-formula) below; the starting budget applies this guide's 120% rule. The day mixes are illustrative, not measured. Replace them with two weeks of real numbers before you set anyone's budget.
+
+> **Note**: The modelled costs price complex tasks at **Opus 5.5** (released 2026-09-22, now the default Opus, **$4/$20**). At the $5/$25 shared by legacy Opus 5 / 4.8 / 4.7 / 4.6 / 4.5 (cache read $0.50) a complex task costs $0.71 instead of $0.48, and at the retired Opus 4.1's $15/$75 it costs $2.12 (every rate 3x Opus 5). The tokenizer shared by Opus 4.7 and every Opus since (including 5.5) produces about 30% more tokens for the same text ([Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing)), so budgeting about 30% higher than you would for 4.6 is wise.
+
+> **Budget risk specific to Opus 5.5**: adaptive thinking is **always on** -- `thinking: {type: "disabled"}` returns a 400 -- and reasoning tokens bill as **output** at $20/MTok. Default effort is `medium` (Opus 5 defaulted to `high`), so a developer who never sets effort thinks less than on Opus 5; but any tooling that disabled thinking on Opus 5 now pays for thinking it did not pay for before. That makes the output side of the bill less predictable than the 20% rate cut suggests, so re-baseline after migrating. Anthropic's testing found Opus 5.5 at `medium` "matches or exceeds Opus 5 at high on coding and knowledge-work evaluations", but at the same effort it "tends to think more per turn than Claude Opus 5, most of all at xhigh and max" ([model-config page](https://code.claude.com/docs/en/model-config); [Opus 5.5 what's new](https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5)). `max_tokens` is a hard cap on thinking **plus** visible text: in Anthropic's published runs a 16,384-token cap ended about a quarter of Opus 5.5's attempts and 43% of Fable 5.1's, and the guidance is 64,000 for agentic work. On SWE-bench Pro, Opus 5.5 at high costs about 1.4x its medium default and xhigh 2.5x high, so budget the complex-task tier from those ratios until you have two weeks of real numbers. And price the tail, not the median: in one Anthropic run, two of 20 problems carried 43% of spend ([cost-optimization guide](https://platform.claude.com/docs/en/about-claude/models/optimizing-for-cost-and-intelligence)).
+
+> **Fast Mode**: if anyone on the team enables Fast Mode (`speed: "fast"`), their rate doubles. On Fable 5.2 and Mythos 5.2 it is $16/$80 per MTok, 4x standard Opus 5.5 (computed: $16 / $4), with no beta header, on the Claude API, both Claude Models on Google Cloud offerings (Google sets the price on the Google-managed one) and Microsoft Foundry hosted on Anthropic, where it is the separate model `claude-fable-5-2-fast`; in Claude Code it needs v2.1.321 or later ([fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode), [Claude Code fast mode](https://code.claude.com/docs/en/fast-mode), read 2026-11-10). On Opus 5.5 it is $8/$40 per MTok, generally available since 2026-10-15 with no beta header, on the Claude API, Claude Models on Google Cloud (Anthropic managed) and Microsoft Foundry deployments hosted on Azure. On Opus 5 and Opus 4.8 it is $10/$50, a research preview on the Claude API only behind the `fast-mode-2026-02-01` beta header; Opus 4.8's fast mode is deprecated and is removed on 2026-11-30, after which `speed: "fast"` on `claude-opus-4-8` errors with no fallback ([fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode), read 2026-11-01). It buys up to 2.5x output tokens per second, not faster time-to-first-token, and it is supported on **Fable 5.2, Mythos 5.2, Opus 5.5, Opus 5 and Opus 4.8 only**. On Opus 4.7 the request now errors out; on Opus 4.6 it silently runs at standard speed and standard rates. In Claude Code it is not offered on Bedrock, Google Cloud (Google managed, formerly Vertex AI), Foundry or Claude Platform on AWS; on a Claude plan, Team seats included, it is billed to usage credits only; and fast and standard speed keep separate caches, so each toggle can re-read the conversation uncached ([Claude Code fast mode](https://code.claude.com/docs/en/fast-mode), read 2026-11-01). Treat Fast Mode as a 2x line item on any budget tier that uses it, keep it off routine work, and see [Controls That Enforce a Budget](#controls-that-enforce-a-budget) for `fastModePerSessionOptIn`.
+
+### What the Dollars Mean on Each Plan
+
+The modelled costs above are API-rate dollars. How they turn into a bill depends on how the team pays ([claude.com/pricing](https://claude.com/pricing), [What is the Team plan?](https://support.claude.com/en/articles/9266767-what-is-the-team-plan), [How am I billed for my Enterprise plan?](https://support.claude.com/en/articles/11526368-how-am-i-billed-for-my-enterprise-plan), [costs page](https://code.claude.com/docs/en/costs), read 2026-11-01):
+
+| How the team pays | Fixed cost | What usage costs | Where a dollar budget applies |
+|-------------------|------------|------------------|-------------------------------|
+| **Claude Console (API key)** | None | Every token at API rates | All usage: the modelled costs are the bill |
+| **Team plan** (2 to 150 seats) | Standard seat $20/month billed annually or $25 monthly; Premium seat $100/month billed annually or $125 monthly | Nothing extra inside the seat allowance: Standard is 1.25x Pro's usage per session, Premium 6.25x, per member and not pooled. Past it, usage credits at API rates | Usage-credit spend, capped per organization, group or member |
+| **Enterprise** (new seat) | $20/seat/month billed annually, 20-seat minimum | All usage at API rates; no per-seat allowance | All usage, plus the seat fee; admins set user and org spend limits |
+| **Bedrock, Google Cloud, Foundry** | None | Your cloud's per-token rates | Your cloud's budget controls |
+
+For the modelled mid-level developer, a new Enterprise seat costs $68.83 a month (computed: $20 + $48.83). A Team seat costs its fixed price whether or not the allowance covers that developer's month; Anthropic states seat limits as multiples of Pro, not tokens, so this guide cannot say which role fits inside a Standard seat. Run the two-week calibration below on the seat you plan to buy. Fable 5.2, 5.1 and 5 are included up to half the weekly limit on Premium seats and billed to usage credits on Standard seats ([Claude Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan), read 2026-11-10). For the Fable 5.2 launch, Standard seats get every Fable model included, up to half the weekly limit, through 2026-11-16 11:59 pm PT, and Premium seats get one to three Fable limit resets by the organization's subscription length, expiring 2027-03-08 ([Fable 5.2 launch offers](https://support.claude.com/en/articles/17506494-claude-fable-5-2-launch-offers), read 2026-11-10). On Enterprise, Fable 5.2 stays off until an admin enables it; seven days after launch it is added to every role that has any Fable model enabled, unless an admin opts out. Team owners can prepay usage credits as usage bundles, $50 of usage for $45, $250 for $200 or $1,000 for $700, up to $3,000 of bundles a month; bundle credit applies only once members are past their limits with usage credits on ([Buy usage bundles](https://support.claude.com/en/articles/14246112-buy-usage-bundles), read 2026-11-01). Enterprise's earlier Standard and Premium seats are legacy and draw from a per-seat allowance like Team seats.
+
+### Setting the Initial Budget
+
+Start with a **two-week calibration period**:
+
+1. Have each developer use Claude Code normally for 2 weeks
+2. Track their actual spending (see [Tracking Usage](#tracking-usage-across-team-members))
+3. Set the budget at **120% of their calibrated spending** (gives 20% headroom)
+4. Review and adjust after the first full month
+
+### Budget Enforcement Philosophy
+
+Budgets should be **guardrails, not handcuffs**:
+
+- **Soft limit (80% of budget)**: Developer receives a notification. No action required.
+- **Warning (100% of budget)**: Developer reviews remaining work for the month. Considers switching to cheaper models or manual work for routine tasks.
+- **Hard limit (120% of budget)**: Requires team lead approval to continue. Triggers a review of usage patterns.
+
+Do not set hard limits at 100% -- this causes developers to stop using the tool entirely when they approach the limit, even for high-ROI tasks. The 120% hard limit lets them finish critical work while still flagging overuse.
+
+### Controls That Enforce a Budget
+
+These are the settings that turn the tiers above into limits Claude Code or Anthropic applies (read 2026-11-01):
+
+- **Spend limits**: workspace spend limits on the Claude Console; on Team and Enterprise, usage-credit spend limits for the organization, a group or a member ([costs page](https://code.claude.com/docs/en/costs)). On Bedrock, Google Cloud and Foundry, a self-hosted Claude apps gateway adds per-user spend limits and, from v2.1.316, pooled group budgets: one monthly budget a group's members share on top of each member's own limit, set with `pooled_budget` on the spend limits admin API ([changelog](https://code.claude.com/docs/en/changelog)).
+- **Effort caps**: the `maxEffortLevel` managed setting (v2.1.267) caps effort on any plan and any provider, Bedrock, Google Cloud and Foundry included, and higher levels run at the cap; on Enterprise, admins can also cap effort per model for each custom role, and the lower of the two caps applies ([model config](https://code.claude.com/docs/en/model-config#organization-effort-limits), [settings reference](https://code.claude.com/docs/en/settings-reference#maxeffortlevel)). Effort is the main lever on Opus 5.5's always-on thinking: on SWE-bench Pro its `xhigh` cost 2.5x `high` ([cost-optimization guide](https://platform.claude.com/docs/en/about-claude/models/optimizing-for-cost-and-intelligence)), so a cap at `high` keeps `xhigh` and `max` off the bill.
+- **Model allowlists**: `availableModels` with `enforceAvailableModels` on any provider; on Enterprise, organization model restrictions per custom role, which reach Anthropic API and LLM gateway sessions only ([model config](https://code.claude.com/docs/en/model-config)).
+- **Fast mode**: `fastModePerSessionOptIn: true`, deployed through server-managed settings on Team or Enterprise, stops a saved `/fast` from turning fast mode on in every later session, and refuses `/fast on` outside interactive terminal sessions ([settings reference](https://code.claude.com/docs/en/settings-reference#fastmodepersessionoptin)).
+- **Per-session dollar caps** (this repo, opt-in): Claude Code's only dollar cap, `--max-budget-usd`, works in print mode only, so an interactive session has none. [hooks/budget-tracker.sh](../hooks/budget-tracker.sh) adds one as a PreToolUse hook that prices the session's own transcript, subagents included, with claude-rate's rate table:
+
+  | Variable | What it sets |
+  |----------|--------------|
+  | `BUDGET_SESSION_USD_WARN` | A warning once the session's estimate passes it |
+  | `BUDGET_SESSION_USD` | A cap on one session: past it, Claude Code asks you before the next tool call |
+  | `BUDGET_DAY_USD` | A cap on today's spend (local calendar day) across every session the hook priced on this machine |
+  | `BUDGET_TURN_USD` | A cap on one prompt and the work it starts |
+  | `BUDGET_HARD_DENY=1` | Denies every tool call once a cap is 120% spent; from 100% to 120% the hook still asks |
+  | `CLAUDE_RATE_PY` | Where the hook finds claude-rate's `rate.py`, when it is not in the usual place |
+
+  Three limits to plan around. The figure is a list-price estimate, not your bill, and on Pro, Max or Ultra it is API-equivalent value, not money spent. The transcript is written asynchronously and can lag the conversation, so the cap can trip a request late; leave headroom. In a `-p` run no one can answer the prompt, so Claude Code denies an `ask` there (both from the [hooks reference](https://code.claude.com/docs/en/hooks#pretooluse-decision-control), read 2026-11-03). To keep the [120% rule](#budget-enforcement-philosophy) above, warn at the budget and put any hard deny at 120% of it. [hooks/README.md](../hooks/README.md) has the wiring and [hooks/settings-example.json](../hooks/settings-example.json) the entry to merge; the dollar caps stay off until you set one of these variables.
+
+---
+
+## Monthly Cost Estimation Formula
+
+### The Basic Formula
+
+```
+Monthly Cost = Daily Tasks x Avg Cost Per Task x Working Days
+
+Where:
+  Daily Tasks      = Number of Claude Code interactions per day
+  Avg Cost Per Task = Weighted average across model tiers
+  Working Days     = Typically 22 per month
+```
+
+### Detailed Estimation
+
+For a more accurate estimate, break down by task type:
+
+```
+Monthly Cost = (Simple Tasks x Simple Cost) +
+               (Medium Tasks x Medium Cost) +
+               (Complex Tasks x Complex Cost)
+
+Where (per developer per day, the mid-level day):
+  Simple Tasks  = 20 tasks/day x $0.0025 (Haiku 5.5, 3-turn session)   = $0.050/day
+  Medium Tasks  = 10 tasks/day x $0.12   (Sonnet 5.5, 10-turn session) = $1.215/day
+  Complex Tasks =  2 tasks/day x $0.48   (Opus 5.5, 20-turn session)   = $0.955/day
+
+  Daily Total   = $2.22/day
+  Monthly Total = $48.83/developer (22 days, routed)
+```
+
+> **How the task costs are computed**: each task is one focused session at this repo's calculator defaults (3,500-token system prompt, 100-line CLAUDE.md at 10 tokens per line, measured at 9.8 per line across this repo's 15 CLAUDE.md files, 2 MCP servers, one 2,000-token file read, 500 output tokens per turn, history growing 1,500 tokens per turn), billed the way Claude Code bills: each request reads the whole previous request from cache and writes only the new exchange at the 5-minute rate ([formula](01-understanding-costs.md#estimated-session-cost)). Exact values: $0.0025175, $0.12145 and $0.47740 per task. The turns per task and tasks per day are illustrative. The same day with every task on Opus 5.5 costs $5.32 ($116.95 a month), so routing removes 58% of that bill.
+
+> **Haiku 5.5 simple tasks**: Haiku 5.5 bills $0.10/$0.50 per 1M up to 100K prompt tokens and $0.50/$2.50 above. A 3-turn session at the calculator defaults peaks at a 12,500-token prompt, so all of it bills at the lower tier. Legacy Haiku 4.5 ($1/$5) is 10x per token: $0.025 per task, $0.50/day for the simple-task line and $58.80 for the month. With Haiku 5.5's token counts about 30% larger for the same text ([Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing): "approximately 30% more tokens"), the real per-task gap is about 7.7x (10 / 1.3).
+
+> **Note**: A complex task costs $0.48 on Opus 5.5 ($4/$20), $0.71 at the $5/$25 shared by legacy Opus 5, 4.8, 4.7 and 4.6, and $2.12 at old Opus 4.1 pricing ($15/$75, every rate 3x Opus 5). The model assumes 500 output tokens per turn; on Opus 5.5 thinking is always on and its tokens bill as output at $20/MTok, so complex tasks run at `xhigh` or `max` effort land higher.
+
+### Estimation Worksheet
+
+Fill in your team's numbers:
+
+```
+TEAM COST ESTIMATION WORKSHEET
+
+Team size:                    _____ developers
+Working days/month:           _____ (default: 22)
+
+Per Developer (daily averages):
+  Simple tasks (Haiku 5.5):   _____ tasks x $0.0025 = $_____ /day
+  Medium tasks (Sonnet 5.5):  _____ tasks x $0.12 = $_____ /day
+  Complex tasks (Opus 5.5):   _____ tasks x $0.48 = $_____ /day
+
+  Daily subtotal:             $_____ /day
+  Monthly subtotal:           $_____ x 22 = $_____ /month
+
+Team Monthly Total:           $_____ x _____ developers = $_____ /month
+
+Add 20% buffer:              $_____ x 1.2 = $_____ /month (budgeted)
+```
+
+### Example: Team of 5
+
+```
+Junior Dev (2):      $33.26/month x 2 = $66.52
+Mid-Level Dev (2):   $48.83/month x 2 = $97.66
+Tech Lead (1):       $69.10/month x 1 = $69.10
+
+Subtotal:            $233.28/month
+Buffer (20%):        $46.66/month
+Budgeted Total:      $279.94/month
+
+Compare to all-Opus 5.5: the same tasks on Opus 5.5 = $552.49/month
+Savings: $319.21/month = $3,831/year
+```
+
+Computed from the role table above. "All-Opus" runs every task in the same day mixes on Opus 5.5 with the same turn counts. At legacy Opus 5 rates the all-Opus team is $760.55/month, so against that habit routing on current models saves $527.27/month: the Opus 5.5 price cut does part of the work, routing does the rest.
+
+---
+
+## Tracking Usage Across Team Members
+
+### Method 1: Claude Code's Built-In Usage
+
+Each developer can check their usage with the `/usage` command in Claude Code (`/cost` and `/stats` open the same screen). Its Session block shows the session's token usage and a `Total cost` line (an estimate at list price, intended for API users); an admin can set the `modelPricing` managed setting (v2.1.242) so that figure, the status line and OpenTelemetry use your contracted rates. On a Pro, Max, Ultra ($200, formerly Max 20x), Team or Enterprise plan it also shows a plan usage breakdown attributing recent usage to skills, subagents, plugins and individual MCP servers, from that machine's session history only. `/insights` reports how you work (friction points, misunderstood requests) rather than how many tokens you used, and its own run counts against your usage.
+
+For historical and team-level data, where you look depends on how the team signs in ([costs page](https://code.claude.com/docs/en/costs), read 2026-11-01):
+
+| Setup | See spend | Cap spend | Per-user numbers |
+|-------|-----------|-----------|------------------|
+| **Claude Console (API)** | Console usage page | **Workspace spend limits** on total Claude Code spend | Console dashboard; Claude Code Analytics API; Usage and Cost Analytics API |
+| **Claude for Teams / Enterprise** | Spend report in org analytics, which covers usage-credit spend only (usage inside a seat allowance is not metered in dollars) | The seat allowance, then usage-credit spend limits in admin settings | Spend report CSV; on Enterprise, the analytics APIs |
+| **Bedrock / Google Cloud / Microsoft Foundry** | Your cloud billing console | Your cloud's budget controls, or a Claude apps gateway's spend limits | OpenTelemetry, a Claude apps gateway or an LLM gateway |
+
+**OpenTelemetry export** works on every setup and is the only option Anthropic lists that streams per-user token and cost metrics into your own observability stack in near real time -- the natural feed for the dashboards and alerts later in this guide. From v2.1.300 its `api_request` events carry `cache_creation_5m_tokens` and `cache_creation_1h_tokens`, so a dashboard can price 5-minute writes (1.25x base input) and 1-hour writes (2x) separately ([changelog](https://code.claude.com/docs/en/changelog), read 2026-11-01).
+
+**New on the API platform** ([release notes](https://platform.claude.com/docs/en/release-notes/overview), read 2026-11-01):
+
+- **Usage and Cost Analytics API** (2026-10-29, beta header `analytics-usage-cost-2026-08-24`): `/v1/organizations/analytics/usage` and `/v1/organizations/analytics/cost` report token usage and cost for Claude Console and Claude Enterprise organizations, filtered and grouped by model, workspace, API key and the user or service account behind each request. The older Usage and Cost API, and the usage and cost report endpoints of the Enterprise Analytics API, are now legacy but still supported.
+- **OpenTelemetry export for the API** (2026-10-14, beta): traces Messages API requests and Claude Managed Agents sessions into your observability platform once you add a destination in the Claude Console, so the team's API automation lands on the same dashboards as Claude Code.
+
+### Method 2: claude-rate on Local Transcripts
+
+[claude-rate](../tools/claude-rate/README.md) prices each developer's own Claude Code transcripts at list price, per request, the way Anthropic bills cache reads and writes:
+
+```bash
+# The last 30 days on this machine: list-price spend per model, cache hit rate
+# (from a clone without installing: python tools/claude-rate/rate.py --usage 30)
+claude-rate --usage 30
+
+# Where it went (claude-rate 0.4.0 or later); any of project, branch, session,
+# day, week, version, skill, mcp, plugin, agent
+claude-rate --usage 30 --by project,session,day
+
+# The same as JSON for a script or a team sheet
+claude-rate --usage 30 --json
+```
+
+`--usage DAYS` windows by each request's own timestamp, so a transcript touched today does not drag older requests into the window. Claude Code deletes session files older than `cleanupPeriodDays` (30 days by default) at startup ([costs page](https://code.claude.com/docs/en/costs), read 2026-11-01), so no window can reach further back than that. Read the `skill`, `mcp`, `plugin` and `agent` views as "requests Claude Code tagged while that skill, server, plugin or agent was active": a tag covers the whole request, cached prefix included, not the part that one component added. The dollars are list price; on a plan they are API-equivalent value, and the [reconcile section](#reconcile-the-estimate-against-the-bill) below shows how to check them against a bill.
+
+### Method 3: Team Dashboard
+
+For teams using Anthropic's API with organization billing, create a simple tracking system:
+
+```
+Weekly Team Report Template:
+
+Developer       | This Week | Month-to-Date | Budget | % Used
+----------------|:---------:|:-------------:|:------:|:------:
+Alice (Jr)      | $9.40     | $28.20        | $50    | 56%
+Bob (Mid)       | $14.90    | $48.10        | $80    | 60%
+Carol (Sr)      | $17.30    | $69.40        | $100   | 69%
+Dave (Mid)      | $12.60    | $41.80        | $80    | 52%
+Eve (Lead)      | $22.10    | $88.50        | $130   | 68%
+
+Team Total      | $76.30    | $276.00       | $440   | 63%
+```
+
+### OpenTelemetry Recipe
+
+To get every developer's token and cost metrics into your own collector, put the exporter settings in managed settings, for example `managed-settings.json` in the system directory (`/Library/Application Support/ClaudeCode/` on macOS, `/etc/claude-code/` on Linux and WSL, `C:\Program Files\ClaudeCode\` on Windows). Everything in this subsection is from Claude Code's [monitoring page](https://code.claude.com/docs/en/monitoring-usage) and [managed settings page](https://code.claude.com/docs/en/managed-settings) (read 2026-11-03); this repo hosts and collects nothing.
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.example.com:4317"
+  }
+}
+```
+
+The traps the page documents:
+
+- **No default protocol.** Set `OTEL_EXPORTER_OTLP_PROTOCOL` (`grpc`, `http/json` or `http/protobuf`), or the per-signal protocol, for every `otlp` exporter you turn on.
+- **A repository cannot turn telemetry on.** Since v2.1.282 Claude Code drops the exporter variables (`CLAUDE_CODE_ENABLE_TELEMETRY`, the exporter selectors, the `OTEL_EXPORTER_OTLP_*` endpoints, headers and protocols, the content-logging switches) from a project's `.claude/settings.json` and `.claude/settings.local.json`, except values that turn something off. Set them in managed settings, the shell, or each developer's `~/.claude/settings.json`.
+- **Managed credentials lock the destination.** Setting `OTEL_EXPORTER_OTLP_HEADERS` (or a client key or certificate) in managed settings makes Claude Code remove every developer-set endpoint variable at startup, so the credentials reach only your collector; setting `OTEL_EXPORTER_OTLP_ENDPOINT` removes developer-set per-signal endpoints. Exporter selectors are not locked this way: set them in managed settings too if a developer must not switch a signal off.
+- **Content logging is off by default; keep it off.** Prompts, assistant text, tool input and raw API bodies are logged only when you turn on `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_ASSISTANT_RESPONSES`, `OTEL_LOG_TOOL_DETAILS` or `OTEL_LOG_RAW_API_BODIES`. The trade-off: without `OTEL_LOG_TOOL_DETAILS=1`, the agent, skill, plugin and MCP names on the cost metric show as `"custom"` or `"third-party"` for anything user-defined or third-party, and with it, Bash commands and tool input are logged too.
+- **Cardinality.** `OTEL_METRICS_INCLUDE_SESSION_ID` and `OTEL_METRICS_INCLUDE_ACCOUNT_UUID` default to `true`. Setting `OTEL_METRICS_INCLUDE_SESSION_ID=false` cuts metric cardinality and storage, and loses the per-session breakdown.
+- **Timing and subprocesses.** Metrics export every 60,000 ms by default (`OTEL_METRIC_EXPORT_INTERVAL`), logs every 5,000 ms. Claude Code does not pass `OTEL_*` variables to the Bash tool, hooks or MCP servers it starts.
+- **Check it arrives.** Look for the `claude_code.session.count` metric on your backend. If nothing comes, start Claude Code with `claude --debug-file <path>` and read the `[3P telemetry]` errors.
+
+Which signal answers which cost question:
+
+| Question | Signal | Split by |
+|----------|--------|----------|
+| Spend per developer and model | `claude_code.cost.usage` (USD), incremented after each API request | `model` plus the standard attributes, such as the account |
+| Main conversation vs subagents | `claude_code.cost.usage`, `claude_code.token.usage` | `query_source`: `main`, `subagent` or `auxiliary` |
+| Which skill, plugin, subagent type or MCP server | the same two metrics | `skill.name`, `plugin.name`, `agent.name`, `mcp_server.name`, `mcp_tool.name` (redacted as above) |
+| Fast mode and effort | the same two metrics | `speed`, `effort` |
+| Tokens by type | `claude_code.token.usage` | `type`: `input` (uncached only), `output`, `cacheRead`, `cacheCreation` (5-minute and 1-hour writes together) |
+| 5-minute vs 1-hour cache writes, cost per request | the `claude_code.api_request` event | `cache_creation_5m_tokens`, `cache_creation_1h_tokens` ([v2.1.300+](#method-1-claude-codes-built-in-usage)), `cost_usd` |
+
+The fleet cache-hit ratio, defined the way claude-rate defines it: sum `claude_code.token.usage` by `type`, then cacheRead / (input + cacheRead + cacheCreation). Because `input` excludes cache reads and writes, that denominator is every prompt token. The cost metric is an approximation at list price unless the `modelPricing` managed setting is in effect (see Method 1); the next subsection checks it against the bill. Metric names as stored depend on your exporter and backend (a Prometheus-only exporter drops the units), so read them off your own collector before writing queries.
+
+### Reconcile the Estimate Against the Bill
+
+claude-rate, `/usage`, the status line and OpenTelemetry all estimate from token counts. To check an estimate against what Anthropic charges a Claude Console organization:
+
+1. On each machine, run `claude-rate --usage 7 --json` and read `.usage.facts.list_price_dollars` (per model: `.usage.facts.by_model`). The window is the last 7 x 24 hours up to now, by each request's UTC timestamp.
+2. Pull the same days from the Usage and Cost Analytics API cost endpoint with an Admin API key, grouped by model ([Usage and Cost Analytics API](https://platform.claude.com/docs/en/manage-claude/usage-cost-analytics-api), read 2026-11-03):
+
+   ```bash
+   curl --globoff "https://api.anthropic.com/v1/organizations/analytics/cost?\
+   starting_at=2026-10-27T00:00:00Z&\
+   ending_at=2026-11-03T00:00:00Z&\
+   group_by[]=model" \
+     -H "anthropic-version: 2023-06-01" \
+     -H "anthropic-beta: analytics-usage-cost-2026-08-24" \
+     -H "x-api-key: $ADMIN_API_KEY"
+   ```
+
+3. Compare claude-rate's figure with each row's `cost.list_amount` (cost at list prices), not `cost.amount` (after discounts, before credits). Both are decimal strings in cents with six decimals: `"41280.000000"` is $412.80.
+
+Where the two will differ, and why:
+
+| Gap | Why | What to do |
+|-----|-----|------------|
+| Window edges | claude-rate's window ends now; the API rounds the range to UTC hour or bucket boundaries, and its data typically lands within 4 hours (up to 24) and can be revised until about 7 days after the month ends | Compare whole days at least a day old, and expect the newest day to differ |
+| Other machines and other API work | claude-rate reads one machine's transcripts; the API covers every request in the organization | Sum claude-rate across the team's machines, and filter the API by workspace, API key or actor (keys Claude Code creates at sign-in live in the Claude Code workspace) |
+| Discounts and contracted rates | claude-rate prices at list | Compare with `list_amount`; set `modelPricing` so `/usage`, the status line and OpenTelemetry report your rates |
+| Priority Tier | Requests under a commitment add zero token cost to `amount` and `list_amount`; the commitment fee is billed separately | Expect claude-rate to be higher by those requests |
+| Web search, code execution and other non-token rows | The API reports them as separate `cost_type` rows; claude-rate prices tokens only | Add `group_by[]=cost_type` and compare the `tokens` rows |
+| Expired transcripts | Claude Code deletes session files older than `cleanupPeriodDays` (30 by default) | Keep the window inside it |
+| Plans | Pro, Max, Ultra and plan seats have no per-token bill; the Team and Enterprise spend report covers usage-credit spend only | Treat claude-rate's figure as API-equivalent value |
+| Bedrock, Google Cloud (Google managed), Microsoft Foundry | Billed in your cloud account; Anthropic's analytics do not cover it ([costs page](https://code.claude.com/docs/en/costs), read 2026-11-03) | Compare with your cloud billing console, or with OpenTelemetry |
+
+One request spans at most 31 days, and `starting_at` must be on or after 2026-01-01 and within the last 365 days, so split a longer reconciliation into several calls.
+
+### Key Metrics to Track
+
+| Metric | What It Tells You | Target |
+|--------|-------------------|--------|
+| **Cost per developer per day** | Individual efficiency | $2.22 modelled for the routed mid-level day ([formula](#monthly-cost-estimation-formula)); Anthropic's enterprise average is ~$13/active day, 90% of users under $30 |
+| **Model distribution** | Are devs using the right models? | No published target split. The computed effect: moving 30% of Opus 5.5 spend to Haiku 5.5, on prompts under 100K tokens, cuts the bill 29% (0.30 x 0.975, [Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing)) |
+| **Tokens per task** | Are prompts efficient? | Decreasing over time |
+| **Cost per commit** | Cost of productive output | Decreasing over time (no published benchmark) |
+| **Opus usage %** | Over-reliance on expensive model | No published target; check that the Opus tasks are the complex ones |
+
+---
+
+## Claude Code vs Claude API vs Manual Coding
+
+### When to Use Each
+
+Not every task should go through Claude Code. Here is a decision framework for teams:
+
+| Approach | Best For | Typical Cost | Speed |
+|----------|----------|:------------:|:-----:|
+| **Claude Code** | Interactive development, multi-file changes, exploration | Modelled per task: $0.0025 simple (Haiku 5.5), $0.12 medium (Sonnet 5.5), $0.48 complex (Opus 5.5) | Fast (for complex work) |
+| **Claude API** (direct) | Batch processing, CI/CD pipelines, automated code review | $0.04 for one Sonnet 5.5 request of 10K input + 2K output ($0.02 on Batch) | Variable |
+| **Manual coding** | Trivial changes, domain-expert knowledge, creative design | $0 (but developer time) | Depends on task |
+
+> **Plan API credits (since 2026-10-07)**: Max, Ultra and Team plans include a monthly Claude API credit -- $100 on Max, $200 on Ultra (then named Max 20x), and on Team $20 per Standard seat and $100 per Premium seat, pooled per month and **capped at $500** ([API credits for Max, Ultra, and Team plans](https://platform.claude.com/docs/en/about-claude/api-credits-for-subscribers), read 2026-11-01). A 5-seat Standard team gets 5 x $20 = $100 a month; a 10-seat Premium team would earn 10 x $100 = $1,000 but is capped at $500. The credit covers the Claude API, Claude Managed Agents, the Claude Agent SDK and the playground, through the Claude API in the Claude Console only (not Bedrock, Google Cloud, Microsoft Foundry or Claude Platform on AWS), and it covers `claude -p` run with an API key from the linked Console organization, because that bills as Agent SDK usage. It does **not** cover interactive Claude Code, `claude -p` signed in with a plan, runs started by the Claude Code GitHub Action (Claude Code usage even with `-p`), or usage credits (formerly extra usage) ([Help Center](https://support.claude.com/en/articles/17154008-monthly-api-credits-for-max-ultra-and-team-plans), read 2026-11-01). It expires at the end of each billing cycle with no rollover. New subscribers can claim it after 7 days; Free, Pro and Enterprise are not eligible. For budgeting, count it against the **Claude API** row above (CI code review, batch jobs), never against interactive Claude Code spend.
+
+### Decision Matrix
+
+```
+Is the task repetitive and automated?
+├── YES → Claude API (batch processing, CI pipelines)
+└── NO ↓
+
+Does the task require interactive back-and-forth with code?
+├── YES → Claude Code
+└── NO ↓
+
+Is the task trivial (< 30 seconds to do manually)?
+├── YES → Manual coding
+└── NO ↓
+
+Does the task require deep domain knowledge only the developer has?
+├── YES → Manual coding (with Claude Code for boilerplate parts)
+└── NO → Claude Code
+```
+
+### Cost Comparison for Common Workflows
+
+| Workflow | Claude Code | Claude API | Manual | Recommendation |
+|----------|:-----------:|:----------:|:------:|----------------|
+| Code review (PR) | $0.12 | $0.04 ($0.02 on Batch) | 20 min | API (automated in CI) |
+| Generate test suite | $0.12 | $0.056 | 45 min | Claude Code |
+| Fix linting errors | $0.0025 | N/A | 3 min | Manual (use lint --fix) |
+| Write documentation | $0.12 | $0.046 | 30 min | Claude Code |
+| Scaffold new service | $0.12 | N/A | 20 min | Claude Code |
+| Update dependency versions | $0.0025 | N/A | 5 min | Manual (Renovate/Dependabot) |
+
+> Claude Code column: one modelled task of its class, simple on Haiku 5.5 or medium on Sonnet 5.5 ([estimation formula](#monthly-cost-estimation-formula)). Claude API column: one request at Sonnet 5.5 list rates ($2/$10 per 1M), with no Claude Code system prompt or tool loop: code review 10K input + 2K output, test suite 8K + 4K, documentation 8K + 3K; Batch halves it ([Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing)). Manual times are illustrative, not measured.
+
+---
+
+## ROI Calculation Template
+
+### The Core ROI Formula
+
+```
+ROI = (Value of Time Saved - Claude Code Costs) / Claude Code Costs x 100%
+
+Where:
+  Value of Time Saved = Hours Saved x Developer Hourly Rate
+  Claude Code Costs   = Monthly token spend + subscription costs
+```
+
+### Detailed ROI Worksheet
+
+```
+MONTHLY ROI CALCULATION
+
+1. TIME SAVINGS
+   Tasks accelerated by Claude Code:         _____ tasks/month
+   Average time saved per task:               _____ minutes
+   Total time saved:                          _____ hours/month
+   Developer fully-loaded hourly rate:        $_____ /hour
+   Value of time saved (A):                   $_____ /month
+
+2. QUALITY IMPROVEMENTS (optional, harder to quantify)
+   Bugs prevented by AI-assisted code review: _____ /month
+   Average cost per production bug:           $_____
+   Bug prevention value (B):                  $_____ /month
+
+3. CLAUDE CODE COSTS
+   Monthly token spend:                       $_____ /month
+   Subscription cost (Pro $20/mo, Max $100/mo, Ultra $200/mo;
+     Team Standard $25/mo or $20 annual, Premium $125/mo or $100 annual;
+     Enterprise $20/seat annual):         $_____ /month
+   Total Claude Code cost (C):                $_____ /month
+
+4. ROI CALCULATION
+   Total value:     A + B =                   $_____ /month
+   Total cost:      C     =                   $_____ /month
+   Net benefit:     (A + B) - C =             $_____ /month
+   ROI:             ((A + B) - C) / C x 100 = _____%
+```
+
+### Example ROI Calculation
+
+**Scenario**: Mid-level developer, $75/hour fully-loaded rate
+
+```
+TIME SAVINGS:
+  200 tasks/month x 12 minutes saved per task = 40 hours saved
+  40 hours x $75/hour = $3,000 value
+
+CLAUDE CODE COSTS:
+  Token spend: $49/month (the modelled mid-level developer, rounded)
+  Pro plan: $20/month (or Max: $100/month, Ultra: $200/month)
+  Total: $69/month (Pro) or $149/month (Max) or $249/month (Ultra)
+
+ROI:
+  ($3,000 - $69) / $69 = 4,248% ROI (Pro plan)
+  ($3,000 - $149) / $149 = 1,913% ROI (Max plan)
+  ($3,000 - $249) / $249 = 1,105% ROI (Ultra plan)
+
+NET BENEFIT:
+  $2,931/month per developer (Pro plan)
+  $2,851/month per developer (Max plan)
+  $2,751/month per developer (Ultra plan)
+```
+
+The Max and Ultra monthly API credit ($100 on Max, $200 on Ultra) does not reduce C: it does not cover interactive Claude Code, only Claude API work in the Console (see [Plan API credits](#claude-code-vs-claude-api-vs-manual-coding)). Counting both the $49 token spend and a plan price is conservative on Pro, Max, Ultra and Team, where the plan allowance covers usage up to its limit. On a new Enterprise seat it is the bill itself: $20 seat + $49 of usage at API rates = $69, the same C as the Pro line.
+
+Even with conservative estimates (half the tasks, half the time saved: 100 tasks x 6 minutes = 10 hours x $75 = $750), the ROI is still 987% on Pro, 403% on Max and 201% on Ultra. The question is not whether Claude Code is worth it -- it is how to maximize the ROI by minimizing waste.
+
+### ROI by Task Type
+
+| Task Type | Avg Time Saved | Claude Code Cost | ROI (at $75/hr) |
+|-----------|:--------------:|:----------------:|:----------------:|
+| Test writing | 25 min | $0.12 | 25,631% |
+| Bug fixing | 20 min | $0.12 | 20,485% |
+| Component creation | 30 min | $0.12 | 30,777% |
+| Code review | 15 min | $0.12 | 15,338% |
+| Documentation | 20 min | $0.12 | 20,485% |
+| Architecture planning | 45 min | $0.48 | 11,683% |
+| Simple refactoring | 10 min | $0.0025 | 496,424% |
+
+> Claude Code cost is one modelled task of its class (medium on Sonnet 5.5, architecture as a complex Opus 5.5 task, simple refactoring on Haiku 5.5; [estimation formula](#monthly-cost-estimation-formula)), and ROI = (minutes / 60 x $75 - cost) / cost. Time saved per task is illustrative, not measured. Even the lowest-ROI task (architecture planning) returns about 118x the investment.
+
+---
+
+## Cost Allocation by Project and Task Type
+
+### Why Allocate Costs?
+
+Cost allocation helps you:
+1. **Identify expensive projects** that may need optimization
+2. **Justify Claude Code spend** to stakeholders on a per-project basis
+3. **Budget accurately** for future projects based on historical data
+4. **Find patterns** (e.g., "testing tasks cost 3x more than expected")
+
+### Allocation Framework
+
+```
+Organization
+├── Team A
+│   ├── Project: E-commerce Platform
+│   │   ├── Feature development:  45% ($120/month)
+│   │   ├── Bug fixes:            20% ($53/month)
+│   │   ├── Testing:              15% ($40/month)
+│   │   ├── Code review:          10% ($27/month)
+│   │   └── Documentation:        10% ($27/month)
+│   │   Total: $267/month
+│   │
+│   └── Project: Internal Tools
+│       ├── Feature development:  50% ($33/month)
+│       ├── Bug fixes:            25% ($17/month)
+│       └── Testing:              25% ($17/month)
+│       Total: $67/month
+│
+└── Team B
+    └── Project: Mobile API
+        ├── Feature development:  40% ($80/month)
+        ├── Performance work:     25% ($50/month)
+        ├── Bug fixes:            20% ($40/month)
+        └── Testing:              15% ($30/month)
+        Total: $200/month
+```
+
+### Tracking Cost by Project
+
+Use project-level `.claude/` configurations to naturally separate costs:
+
+```
+~/projects/
+├── ecommerce/
+│   └── .claude/
+│       └── settings.json    ← Project-specific settings
+├── internal-tools/
+│   └── .claude/
+│       └── settings.json
+└── mobile-api/
+    └── .claude/
+        └── settings.json
+```
+
+Then report per project. Claude Code keeps each project's sessions in its own folder under `~/.claude/projects/`, and claude-rate's `--by project` view splits the spend the same way (claude-rate 0.4.0 or later):
+
+```bash
+# List-price spend per project over the last 30 days, then per branch
+claude-rate --usage 30 --by project,branch
+```
+
+### Cost Per Feature Estimation
+
+When planning sprints, estimate Claude Code costs alongside development time:
+
+```
+Feature: User notification preferences
+  - Frontend component (Sonnet 5.5, medium: $0.12)
+  - API endpoint (Sonnet 5.5, medium: $0.12)
+  - Database migration (Haiku 5.5, simple: $0.0025)
+  - Unit tests (Sonnet 5.5, medium: $0.12)
+  - Integration test (Sonnet 5.5, medium: $0.12)
+  - Code review assist (Haiku 5.5, simple: $0.0025)
+  Estimated Claude Code cost: $0.49
+
+Feature: Payment system overhaul
+  - Architecture design (Opus 5.5, complex: $0.48)
+  - 5 service refactors (Sonnet 5.5, 5 x medium: $0.60)
+  - Database migration (Opus 5.5 plan + Sonnet 5.5 impl: $0.48 + $0.12)
+  - Test suite (Sonnet 5.5, medium: $0.12)
+  - Security review (Opus 5.5, complex: $0.48)
+  Estimated Claude Code cost: $2.28
+```
+
+Each item is one modelled task of its class from the [estimation formula](#monthly-cost-estimation-formula) (simple: a 3-turn Haiku 5.5 session; medium: 10 turns on Sonnet 5.5; complex: 20 turns on Opus 5.5). Totals use the unrounded task costs: 4 x $0.12145 + 2 x $0.0025175 = $0.49, and 3 x $0.47740 + 7 x $0.12145 = $2.28. On legacy Haiku 4.5 the two simple items cost $0.025 each and the first feature is $0.54.
+
+---
+
+## Scaling Strategies as Your Team Grows
+
+### Phase 1: Small Team (2-5 developers)
+
+**Priority**: Establish good habits early.
+
+| Action | Impact |
+|--------|--------|
+| Set Sonnet 5.5 as the team default model (pin `claude-sonnet-5-5`: outside the Anthropic API the `sonnet` alias means an older $3/$15 Sonnet and `haiku` means legacy Haiku 4.5, and on Microsoft Foundry `opus` means Opus 4.6 ([model config](https://code.claude.com/docs/en/model-config), read 2026-11-01); see [Guide 03](03-model-selection.md#the-sonnet-alias-depends-on-your-provider)) | Prevents Opus overuse from day one |
+| Share a standard CLAUDE.md template | Consistent costs across the team |
+| Create a shared command library | Standardized workflows, pre-set models |
+| Weekly informal cost review | Catch problems early |
+
+**Expected cost**: team size x $48.83/month at the routed mid-level day (modelled), for example $244 for 5 developers. That is the bill at API rates (Console, or Enterprise plus $20 a seat); on a Team plan the bill is the seat prices plus any usage credits (see [What the Dollars Mean on Each Plan](#what-the-dollars-mean-on-each-plan)). Anthropic's enterprise average is $150-250 per developer per month, so calibrate with a pilot.
+
+### Phase 2: Growing Team (5-15 developers)
+
+**Priority**: Systematize and automate.
+
+| Action | Impact |
+|--------|--------|
+| Implement per-developer budgets | Individual accountability |
+| Create role-based budget tiers | Fair budgets by usage pattern |
+| Automate usage tracking | Weekly reports without manual effort |
+| Build an internal "tips" channel | Peer-driven optimization |
+| Conduct monthly cost reviews | Identify trends and outliers |
+
+**Expected cost**: team size x $48.83/month (modelled), for example $488 for 10 developers.
+
+### Phase 3: Large Team (15-50+ developers)
+
+**Priority**: Governance and optimization at scale.
+
+| Action | Impact |
+|--------|--------|
+| Centralized Claude Code configuration | Consistent settings across all projects |
+| Cost allocation by department/project | Accurate chargebacks |
+| Automated budget alerts | Proactive cost management |
+| Quarterly optimization audits | Systematic waste reduction |
+| Internal training program | New hires start optimized |
+| Custom tooling for usage analytics | Deep visibility into spending patterns |
+| Negotiate enterprise pricing | Sales-assisted Enterprise lists tiered incentives on committed spend ([claude.com/pricing](https://claude.com/pricing), read 2026-11-01) |
+
+**Expected cost**: team size x $48.83/month (modelled), for example $2,442 for 50 developers.
+
+### Cost Scaling: Optimized vs Unoptimized
+
+| Team Size | Unoptimized (all Opus 5.5) | Optimized (routed) | Monthly Savings |
+|:---------:|:--------------------------:|:------------------:|:---------------:|
+| 5 | $585 | $244 | $341 |
+| 10 | $1,169 | $488 | $681 |
+| 20 | $2,339 | $977 | $1,362 |
+| 50 | $5,847 | $2,442 | $3,406 |
+
+At 50 developers, model routing saves **$40,869/year** in this model.
+
+> **Note**: Computed with every developer at the mid-level day ([estimation formula](#monthly-cost-estimation-formula)): $48.83 a month routed, $116.95 with every task on Opus 5.5, times team size. On legacy Opus 5 ($5/$25, cache read $0.50) the all-Opus column is $805 for 5 developers and $8,046 for 50; at old Opus 4.1 pricing ($15/$75) it would be three times that. The task counts are illustrative, so the absolute dollars are a floor, but the ratio (routing removes 58% of the all-Opus 5.5 bill) holds for any team size. The tokenizer introduced with Opus 4.7 and carried into 4.8, 5 and 5.5 pushes the absolute dollar totals about 30% higher vs 4.6 for identical workloads (Anthropic pricing page: approximately 30% more tokens for the same text). There is no cost argument for staying on Opus 4.8 or Opus 5.
+
+---
+
+## Onboarding New Team Members Cost-Efficiently
+
+### The Onboarding Cost Problem
+
+New team members using Claude Code for the first time tend to:
+1. Use Opus for everything (it is the most capable, so why not?)
+2. Write vague prompts that trigger clarification loops
+3. Not use plan mode, leading to iterative waste
+4. Not know about /compact, leading to bloated sessions
+5. Ask Claude Code questions they could answer with documentation
+
+No one has published how much more a new developer's first month costs; track it per developer in the Console dashboard or with `/usage`.
+
+### The Onboarding Checklist
+
+Give every new team member this checklist on their first day with Claude Code:
+
+```
+CLAUDE CODE ONBOARDING CHECKLIST
+
+Day 1: Setup
+  [ ] Install Claude Code and verify it works
+  [ ] Copy the team's standard CLAUDE.md to your project(s)
+  [ ] Copy the team's permissions.deny Read(...) rules into .claude/settings.json
+      (.claudeignore is not a Claude Code feature; Read deny rules replace it)
+  [ ] Set your default model to Sonnet 5.5 (not Opus)
+  [ ] Install the team's shared command library
+
+Day 1: Read These Guides (30 minutes total)
+  [ ] Guide 03: Model Selection (know when to use each model)
+  [ ] Guide 04: Workflow Patterns (plan mode, /compact, batch operations)
+  [ ] This guide's ROI section (understand the economics)
+
+Week 1: Practice
+  [ ] Route simple tasks (renames, formatting, lookups) to Haiku 5.5:
+      each costs 1/40 of Opus 5.5 per token while prompts stay under 100K
+  [ ] Use plan mode for any task touching 3+ files
+  [ ] Use /compact at natural breaks in long sessions (on short ones it
+      costs more than it saves; see Guide 04)
+  [ ] Write one complete prompt (no follow-up corrections needed)
+  [ ] Track your daily spend and compare to team averages
+
+Week 2: Optimize
+  [ ] Create 3 personal commands for your most common tasks
+  [ ] Review your Week 1 spending and identify waste
+  [ ] Pair with an experienced team member for one session
+  [ ] Route at least one routine subagent to Haiku (model: haiku) and confirm its share in /usage
+```
+
+### Pair Programming for Cost Efficiency
+
+Have new team members pair with an experienced Claude Code user for their first complex task. The experienced user can:
+- Demonstrate when to use each model
+- Show the plan-then-execute workflow
+- Point out when a task does not need Claude Code at all
+- Share personal tips and shortcuts
+
+No published figure says how much one 30-minute pairing session saves; it is the quickest way to pass these habits on.
+
+### First-Month Budget Strategy
+
+Illustrative multipliers, not measured.
+
+| Week | Budget Multiplier | Rationale |
+|------|:-----------------:|-----------|
+| Week 1 | 1.5x normal | Learning period, expect some waste |
+| Week 2 | 1.3x normal | Getting comfortable, less waste |
+| Week 3 | 1.1x normal | Should be approaching normal efficiency |
+| Week 4 | 1.0x normal | Full budget, normal expectations |
+
+Do not penalize new hires for higher costs in their first two weeks. No published figure says how fast the learning pays back, so watch each new developer's daily cost trend instead.
+
+---
+
+## Budget Alert Systems
+
+### Tier 1: Manual Tracking (Small Teams)
+
+For teams of 2-5, a simple spreadsheet and weekly check-in is sufficient:
+
+```
+Weekly Budget Check (5 minutes per developer):
+1. Read the week's spend: Console usage page (API), org spend report
+   (Team/Enterprise usage credits), /usage for plan usage bars, or
+   claude-rate --usage 7 for one machine's week at list price
+2. Check against weekly budget (monthly budget / 4.3)
+3. If over 80%: review remaining tasks for the week
+4. If over 100%: discuss with team lead
+```
+
+### Tier 2: Automated Alerts (Growing Teams)
+
+Set up automated notifications when developers approach budget limits:
+
+```bash
+#!/bin/bash
+# Example: Simple budget alert script
+# Run daily via cron or CI on each developer machine; needs claude-rate and jq
+
+BUDGET_MONTHLY=80  # dollars, list price
+ALERT_THRESHOLD=0.8 # 80%
+
+# A rolling 30 days of this machine's transcripts at list price, compared with a
+# monthly budget: 30 days against a month. For a weekly budget, use --usage 7
+# against BUDGET_MONTHLY / 4.3 instead; never a 7-day figure against a month.
+current_spend=$(claude-rate --usage 30 --json | jq '.usage.facts.list_price_dollars')
+
+budget_used=$(echo "$current_spend / $BUDGET_MONTHLY" | bc -l)
+
+if (( $(echo "$budget_used > $ALERT_THRESHOLD" | bc -l) )); then
+  printf 'ALERT: Claude Code spend at %.0f%% of monthly budget\n' \
+    "$(echo "$budget_used * 100" | bc -l)"
+  # Send Slack notification, email, etc.
+fi
+```
+
+A rolling 30 days is not the calendar month. For month-to-date pace, claude-rate 0.4.0 or later prints the month so far under every `--usage` report, plus a month-end projection once the `--usage` window and the transcripts on disk both reach back to the 1st and the month has spend on 3 or more days, and `--budget` adds the date that projection crosses your budget:
+
+```bash
+# Month-to-date list-price spend, projected month end, and when it crosses $80
+claude-rate --usage --budget 80
+# The same as JSON, under .usage.facts.pace.budget
+claude-rate --usage --budget 80 --json
+```
+
+The projection is linear from your own days so far, so read it as a pace, not a forecast; the report prints the formula it used.
+
+### Tier 3: Dashboard and Governance (Large Teams)
+
+For teams of 15+, build or adopt a dashboard that shows:
+
+```
+TEAM CLAUDE CODE DASHBOARD
+
+Real-Time Metrics:
+├── Total spend MTD: $847 / $1,400 budget (60%)
+├── Projected month-end: $1,290 (within budget)
+├── Developers over 80% budget: 2 of 18
+└── Cost trend: -12% vs last month
+
+Per-Developer View:
+├── [Green]  Alice: $28 / $50 (56%)
+├── [Green]  Bob: $48 / $80 (60%)
+├── [Yellow] Carol: $83 / $100 (83%) ← approaching limit
+├── [Green]  Dave: $36 / $80 (45%)
+└── [Red]    Eve: $140 / $130 (108%) ← over budget
+
+Alerts This Week:
+├── Carol hit 80% threshold on Tuesday
+├── Eve exceeded budget on Thursday (approved by team lead)
+└── Team Opus usage increased 15% (investigate)
+```
+
+### Alert Configuration Template
+
+```json
+{
+  "budget_alerts": {
+    "per_developer": {
+      "soft_warning": 0.6,
+      "warning": 0.8,
+      "critical": 1.0,
+      "hard_limit": 1.2
+    },
+    "team_total": {
+      "soft_warning": 0.7,
+      "warning": 0.85,
+      "critical": 0.95
+    },
+    "notifications": {
+      "soft_warning": ["slack_dm"],
+      "warning": ["slack_dm", "slack_channel"],
+      "critical": ["slack_dm", "slack_channel", "email_lead"],
+      "hard_limit": ["slack_dm", "slack_channel", "email_lead", "email_finance"]
+    },
+    "check_frequency": "daily"
+  }
+}
+```
+
+---
+
+## Monthly Budget Review Process
+
+### The 30-Minute Monthly Review
+
+Once a month, the team lead should run a structured budget review. Here is the agenda:
+
+```
+MONTHLY CLAUDE CODE BUDGET REVIEW (30 minutes)
+
+1. Numbers (5 min)
+   - Total team spend vs budget
+   - Per-developer spend vs budget
+   - Month-over-month trend
+
+2. Model Distribution (5 min)
+   - Team-wide model split (no published target split; each 10% of Opus 5.5
+     spend moved to Haiku 5.5 removes 9.75% of that spend: 0.10 x 0.975,
+     while the moved prompts stay under 100K tokens)
+   - Identify the heaviest Opus users
+   - Discuss whether Opus usage was justified
+
+3. Outliers (10 min)
+   - Who spent the most? Why? (new feature? debugging session? inefficiency?)
+   - Who spent the least? Are they underutilizing the tool?
+   - Any single sessions that were unusually expensive?
+
+4. Optimizations (5 min)
+   - New commands or templates created this month
+   - Tips shared in the team channel
+   - Patterns to adopt or avoid
+
+5. Next Month (5 min)
+   - Budget adjustments needed?
+   - Any planned large tasks that will spike costs?
+   - New team members joining? (factor in onboarding costs)
+```
+
+### Budget Adjustment Triggers
+
+Increase a developer's budget when:
+- They are consistently hitting >90% and their usage is justified
+- They are taking on a new project with higher complexity
+- They are mentoring/pairing and using Claude Code in teaching sessions
+
+Decrease a developer's budget when:
+- They are consistently under 50% (the budget is not serving as a useful signal)
+- They have moved to less Claude-intensive work
+- Optimization improvements have structurally reduced their costs
+
+### What Good Looks Like
+
+After 3 months of active cost management, a well-optimized team should see the following. Illustrative targets, not measured.
+
+| Metric | Month 1 | Month 3 | Target |
+|--------|:-------:|:-------:|:------:|
+| Average cost/developer | $80 | $45 | $49 (the modelled mid-level day) |
+| Model split (Haiku/Sonnet/Opus) | 20/50/30 | 40/40/20 | No published target |
+| Average turns per task | 8 | 4 | 4 |
+| Budget utilization | 110% | 75% | Under 100% |
+| Developer satisfaction | "Expensive" | "Worth it" | "Essential" |
+
+---
+
+## Summary
+
+| Strategy | Monthly Savings (team of 5) | Effort |
+|----------|:---------------------------:|:------:|
+| Per-developer budgets | No published figure | Low |
+| Model routing guidelines | $319.21 against all-Opus 5.5 (modelled: $552.49 vs $233.28 for the [example team](#example-team-of-5)) | Low |
+| Shared command library | No published figure | Medium (one-time) |
+| Automated usage tracking | No published figure | Medium (one-time) |
+| Onboarding program | No published figure | Medium (one-time) |
+| Monthly budget reviews | No published figure | Low (recurring) |
+| **Combined** | **Not measured combined** | -- |
+
+Only routing has a computable effect here; the other strategies make spend visible and keep the routing habit in place. Measure them on your own team with the Console dashboard or `/usage`, before and after.
+
+---
+
+## Next Steps
+
+- Set up per-developer budgets this week using the tier recommendations above
+- Run the ROI calculation for your team to justify the tool to stakeholders
+- Create a shared CLAUDE.md template and command library
+- Schedule your first monthly budget review
+- Read the [README Quick Start](../README.md#quick-start-5-minutes-no-skill-needed) section for individual-level optimizations that complement team-level management
+
+---
+
+*[Back to README](../README.md) | [Previous: Workflow Patterns](04-workflow-patterns.md)*

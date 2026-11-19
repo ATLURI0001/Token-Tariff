@@ -1,0 +1,121 @@
+#!/bin/bash
+# cost-logger.sh -- Logs estimated cost per tool call.
+# Use with PreToolUse hook to build cost awareness.
+#
+# Hook config (add to settings.json):
+#   "hooks": {
+#     "PreToolUse": [{
+#       "matcher": ".*",
+#       "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/hooks/cost-logger.sh" }]
+#     }]
+#   }
+#
+# Exit codes: 0 = allow (never blocks)
+
+# Claude Code sends the hook payload as JSON on stdin; tool_name and
+# session_id come from there (it sets no per-tool environment variables).
+INPUT="$(cat)"
+read -r TOOL SESSION_ID < <(printf '%s' "$INPUT" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    data = {}
+print(data.get('tool_name') or 'unknown', (data.get('session_id') or 'default').replace(' ', '_'))
+" 2>/dev/null || echo "unknown default")
+LOG_DIR="${TMPDIR:-/tmp}/claude-cost-log"
+mkdir -p "$LOG_DIR"
+SESSION_LOG="$LOG_DIR/session-$(date +%Y%m%d)-${SESSION_ID}.log"
+
+# Estimate tokens by tool type (rough averages)
+case "$TOOL" in
+  Read|Glob|Grep)
+    EST_INPUT=2000
+    EST_OUTPUT=100
+    ;;
+  Edit|Write)
+    EST_INPUT=3000
+    EST_OUTPUT=1500
+    ;;
+  Bash)
+    EST_INPUT=2000
+    EST_OUTPUT=500
+    ;;
+  Agent)
+    EST_INPUT=5000
+    EST_OUTPUT=2000
+    ;;
+  *)
+    EST_INPUT=1000
+    EST_OUTPUT=500
+    ;;
+esac
+
+# Per-model rates in dollars per 1M tokens (verified 2026-10-09).
+# Hook input carries no model, so this reads COST_LOGGER_MODEL (this script's
+# own override), then ANTHROPIC_MODEL, then defaults to the "opus" alias
+# (Opus 5.5); unrecognized model strings fall through to the legacy Opus rate.
+MODEL="${COST_LOGGER_MODEL:-${ANTHROPIC_MODEL:-opus}}"
+case "$MODEL" in
+  *haiku-4-5*|*haiku-4.5*)
+    # Legacy Haiku 4.5. Must match before the generic Haiku branch below.
+    RATE_INPUT=1
+    RATE_OUTPUT=5
+    ;;
+  *haiku*)
+    # Haiku 5.5 is $0.10/$0.50 up to 100,000 prompt tokens ($0.50/$2.50 above).
+    # A per-call estimate here is far below that line, so the low tier applies.
+    RATE_INPUT=0.10
+    RATE_OUTPUT=0.50
+    ;;
+  *sonnet-4-6*|*sonnet-4.6*|*sonnet-4-5*|*sonnet-4.5*)
+    # Legacy Sonnet 4.6 / 4.5 keep $3/$15.
+    RATE_INPUT=3
+    RATE_OUTPUT=15
+    ;;
+  *sonnet*)
+    # Sonnet 5.5 and Sonnet 5 are both $2/$10 (Sonnet 5's rate is permanent).
+    RATE_INPUT=2
+    RATE_OUTPUT=10
+    ;;
+  fable|mythos|fable\[*\]|mythos\[*\]|*fable-5-2*|*fable-5.2*|*mythos-5-2*|*mythos-5.2*)
+    # Fable 5.2 and Mythos 5.2 are $8/$40; the bare alias resolves to Fable 5.2.
+    # Must match before the legacy branch below.
+    RATE_INPUT=8
+    RATE_OUTPUT=40
+    ;;
+  *fable*|*mythos*)
+    # Legacy Fable 5.1 / Fable 5 / Mythos 5.1 / Mythos 5 keep $10/$50.
+    RATE_INPUT=10
+    RATE_OUTPUT=50
+    ;;
+  opus|opus\[*\]|*opus-5-5*|*opus-5.5*|*opus5.5*|*opus5-5*)
+    # Opus 5.5 is $4/$20, 20% below Opus 5. Must match before the generic Opus
+    # branch below, because "opus-5" is a substring of "opus-5-5".
+    RATE_INPUT=4
+    RATE_OUTPUT=20
+    ;;
+  *)
+    # Legacy Opus 5 / 4.8 / 4.7 / 4.6 / 4.5, and unrecognized models: $5/$25.
+    RATE_INPUT=5
+    RATE_OUTPUT=25
+    ;;
+esac
+
+# Log the estimate. Opus 5.5 runs adaptive thinking always on (Opus 5 turns it
+# on by default) and bills reasoning tokens as output, so real output cost can
+# exceed this estimate.
+COST=$(echo "scale=4; ($EST_INPUT * $RATE_INPUT + $EST_OUTPUT * $RATE_OUTPUT) / 1000000" | bc 2>/dev/null || echo "0.01")
+echo "$(date +%H:%M:%S) $TOOL input:~${EST_INPUT} output:~${EST_OUTPUT} ~\$${COST}" >> "$SESSION_LOG"
+
+# Count total calls this session
+COUNT=$(wc -l < "$SESSION_LOG" 2>/dev/null || echo 0)
+
+# Warn at thresholds (informational only, never blocks)
+if [[ "$COUNT" -eq 50 ]]; then
+  echo '{"systemMessage": "50 tool calls this session. Consider starting fresh if switching tasks."}'
+elif [[ "$COUNT" -eq 100 ]]; then
+  echo '{"systemMessage": "100 tool calls. Session history is expensive. Run /compact or start a new session."}'
+fi
+
+exit 0

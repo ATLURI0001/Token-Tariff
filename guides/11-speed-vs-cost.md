@@ -1,0 +1,317 @@
+# Guide 11: Speed vs Cost -- Making Claude Faster Without Burning Money
+
+> **Most "make it faster" problems have a free or cheap fix.** Cache warmth, shorter context, model routing, and effort control cover the vast majority of latency complaints at zero or negative cost. Fast Mode is the deliberate splurge -- a flat 2x token premium that only pays off in one narrow case: when raw output-generation speed directly matters.
+
+> **Fast Mode runs on Fable 5.2, Mythos 5.2, Opus 5.5, Opus 5 and Opus 4.8, each at 2x its own base: $16/$80 on Fable 5.2 and Mythos 5.2, $8/$40 on Opus 5.5, $10/$50 on Opus 5 and Opus 4.8.** Fable 5.2 (released 2026-11-09) and Mythos 5.2 are the first Fable-tier models with Fast Mode, and Fable 5.2 needs no beta header. Opus 5.5 Fast is the cheapest. Opus 5.5 Fast Mode is generally available (out of research preview since 2026-10-15, no beta header, no access request). Opus 5 and Opus 4.8 are still research previews that need the `fast-mode-2026-02-01` header, and Opus 4.8 Fast Mode was deprecated on 2026-10-30 and will be removed on 2026-11-30, after which `speed: "fast"` on `claude-opus-4-8` returns an error with no fallback ([fast mode docs](https://platform.claude.com/docs/en/build-with-claude/fast-mode), [release notes](https://platform.claude.com/docs/en/release-notes/overview), read 2026-11-10). The old 6x tier on Opus 4.7 / 4.6 is gone: `speed: "fast"` now errors on Opus 4.7, and Opus 4.6 accepts it but silently runs at standard speed and standard rates. If you were budgeting for a 6x premium, that line item no longer exists.
+
+---
+
+## Table of Contents
+
+- [The Speed Levers, Ranked by Cost](#the-speed-levers-ranked-by-cost)
+- [Fast Mode Economics](#fast-mode-economics)
+  - [Pricing by Model](#pricing-by-model)
+  - [The OTPS Caveat: What Fast Mode Does Not Speed Up](#the-otps-caveat-what-fast-mode-does-not-speed-up)
+  - [Fast Mode and Prompt Caching](#fast-mode-and-prompt-caching)
+  - [Compatibility Matrix](#compatibility-matrix)
+  - [When the 2x Is Worth It: Deadline Math](#when-the-2x-is-worth-it-deadline-math)
+  - [Opus 5.5 and the Always-On Thinking Tax](#opus-55-and-the-always-on-thinking-tax)
+  - [When It Is Not Worth It](#when-it-is-not-worth-it)
+- [Latency by Model](#latency-by-model)
+- [Thinking and Effort as a Speed Lever](#thinking-and-effort-as-a-speed-lever)
+- [Caching as a Latency Tool](#caching-as-a-latency-tool)
+- [The Inverse Lever: Batch API When Speed Does Not Matter](#the-inverse-lever-batch-api-when-speed-does-not-matter)
+- [Decision Table: "I Need It Faster"](#decision-table-i-need-it-faster)
+- [Key Takeaways](#key-takeaways)
+
+---
+
+## The Speed Levers, Ranked by Cost
+
+Every other guide in this series optimizes for cost. This one covers the speed dimension -- and the first thing to understand is that speed and cost are usually **not** in tension. Most speed levers make your sessions cheaper at the same time.
+
+| Rank | Lever | Cost impact | Speed impact | How |
+|:----:|-------|-------------|--------------|-----|
+| 1 | **Keep the cache warm** | Cheaper (0.1x input on hits; 0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.2 and Fable 5.1) | Up to 85% latency reduction on long prompts (source in [Caching as a Latency Tool](#caching-as-a-latency-tool)) | Turns inside the cache TTL (5 minutes, or 1 hour on a subscription's main conversation); no mid-session model or fast-mode switches, and no effort change where it rebuilds the cache ([Guide 08](08-prompt-caching.md)) |
+| 2 | **Shorter context** | Cheaper (fewer input tokens per turn) | Faster (less input to process each turn) | `/compact`, fresh sessions per task, small CLAUDE.md, `permissions.deny` `Read(...)` rules ([Guide 02](02-context-optimization.md)) |
+| 3 | **Route down to Haiku / Sonnet** | 2x (Sonnet 5.5) to 40x (Haiku 5.5 at $0.10/$0.50 up to 100K prompt tokens; 8x at $0.50/$2.50 above) cheaper than Opus 5.5 per token | Faster -- smaller models have lower latency | Task routing: Haiku for simple, Sonnet for standard ([Guide 03](03-model-selection.md), [Guide 10](10-task-routing.md)) |
+| 4 | **Lower effort / fewer thinking tokens** | Cheaper (thinking tokens are billed output) | Faster (less thinking before the answer) | `effort` parameter on Fable 5.2 / Opus 5.5 / Fable 5.1 / Fable 5 / Opus 5 / Opus 4.8 / Sonnet 5.5 / Haiku 5.5 (plus `thinking: {type: "between_tools"}` on Sonnet 5.5) |
+| 5 | **Fast Mode** (Fable 5.2 / Mythos 5.2 / Opus 5.5 / Opus 5 / Opus 4.8) | **2x premium** on each | Up to 2.5x output tokens per second | `speed: "fast"`; Opus 5 and Opus 4.8 also need `anthropic-beta: fast-mode-2026-02-01` (Fable 5.2 and Opus 5.5 do not) |
+
+Levers 1-4 are free or negative-cost: they make you faster **and** cheaper. Only lever 5 costs money. Exhaust the first four before reaching for it.
+
+---
+
+## Fast Mode Economics
+
+Fast Mode trades money for output-generation speed: up to 2.5x output tokens per second, at a per-token premium. It needs no beta header on Fable 5.2 and Opus 5.5 (generally available on Opus 5.5) and is a research preview on Opus 5 and Opus 4.8.
+
+### Pricing by Model
+
+| Model | Standard (in/out per 1M) | Fast Mode (in/out per 1M) | Premium | Status |
+|-------|:------------------------:|:-------------------------:|:-------:|--------|
+| **Fable 5.2** | $8 / $40 | $16 / $80 | **2x** | No beta header -- the most capable widely released model and the most expensive Fast Mode |
+| **Mythos 5.2** | $8 / $40 | $16 / $80 | **2x** | Same prices as Fable 5.2; verified organizations only |
+| **Opus 5.5** | $4 / $20 | $8 / $40 | **2x** | Generally available -- the current default Opus and the cheapest Fast Mode |
+| **Opus 5** | $5 / $25 | $10 / $50 | **2x** | Research preview, legacy model |
+| **Opus 4.8** | $5 / $25 | $10 / $50 | **2x** | Research preview, legacy model; deprecated 2026-10-30, removal scheduled for 2026-11-30 (`speed: "fast"` then returns an error, no fallback) |
+| **Opus 4.7** | $5 / $25 | -- | -- | **Removed** -- `speed: "fast"` returns an error, with no fallback to standard |
+| **Opus 4.6** | $5 / $25 | -- | -- | **Removed** -- `speed: "fast"` is accepted but silently runs standard speed at standard rates (`usage.speed` comes back `"standard"`) |
+| Fable 5.1 (legacy), Fable 5, Mythos 5.1, Mythos 5, Sonnet (any), Haiku (any, Haiku 5.5 included), Opus 4.5 | -- | -- | -- | **No Fast Mode** |
+
+Three immediate conclusions:
+
+1. **Fast Mode is a flat 2x on all five supported models, so the cheapest base gives the cheapest Fast Mode.** Opus 5.5 charges $8/$40; Opus 5 and Opus 4.8 charge $10/$50; Fable 5.2 and Mythos 5.2 charge $16/$80. The old 6x tier ($30/$150 on Opus 4.7 / 4.6) no longer exists. For Opus-level work pick Opus 5.5: it is the current model and its Fast Mode is 20% cheaper than Opus 5's. At the same token counts, a session that costs $2.33 on standard Opus 5 costs about $1.86 on standard Opus 5.5 and $3.73 on Opus 5.5 Fast Mode, versus $4.66 on Opus 5 Fast Mode. On Fable 5.2 the same tokens cost about $3.73 standard and $7.46 Fast (computed: $1.864 x 2 and $1.864 x 4, since Fable 5.2 is 2x Opus 5.5 per input and output token and its Fast Mode 4x). Those figures price every token at the input and output rates; on a cached session Fable 5.2 lands below 2x Opus 5.5, because both read cache at $0.20 standard and $0.40 Fast.
+2. **The two removals fail differently, and one fails silently.** Opus 4.7 errors, so you find out immediately. Opus 4.6 accepts the request and quietly serves standard speed at standard rates -- no error, no premium, no speedup. If a pipeline still sends `speed: "fast"` to Opus 4.6 and someone reports "Fast Mode stopped helping," check `usage.speed` in the response before debugging anything else. Opus 4.8 joins the erroring group on 2026-11-30.
+3. **Fast Mode now reaches the frontier model, at the highest price.** Fable 5.2 Fast is $16/$80, twice Opus 5.5 Fast's $8/$40 (computed: $16 / $8, $80 / $40). Legacy Fable 5.1 and Fable 5 still have no Fast Mode, so a workload pinned to them keeps only caching, context and effort as speed levers. Before paying $80 per 1M output on Fable 5.2 Fast, check that the task needs Fable at all: Anthropic still says to start with Opus 5.5 for most workloads and move to Fable 5.2 when evals on Opus at higher effort fall short ([models overview](https://platform.claude.com/docs/en/about-claude/models/overview), read 2026-11-10).
+
+### The OTPS Caveat: What Fast Mode Does Not Speed Up
+
+Fast Mode accelerates **output tokens per second (OTPS)** -- the rate at which the response streams out. It does **not** improve **time-to-first-token (TTFT)** -- the wait before the response starts.
+
+This distinction decides whether Fast Mode helps you at all:
+
+| Your bottleneck | Symptom | Does Fast Mode help? |
+|-----------------|---------|:--------------------:|
+| Long output generation | Response streams slowly for minutes (large code file, long document, big diff) | **Yes** -- up to 2.5x faster streaming |
+| Slow start | Long pause before anything appears (huge uncached prompt being processed) | **No** -- fix with caching or shorter context instead |
+| Thinking-heavy startup | Long thinking phase before the answer | **Poor value** -- thinking tokens are output tokens, so they may stream faster, but you pay the premium on every one; lowering `effort` removes them instead |
+| Many short turns | Each turn is quick but there are dozens of them | **Marginal** -- per-turn output is small, so up to 2.5x OTPS saves seconds while costing 2x on every token |
+
+If your pain is the wait before tokens appear, you are paying a 2x premium for nothing. Diagnose the bottleneck first.
+
+### Fast Mode and Prompt Caching
+
+Cache multipliers stack on the Fast Mode rate, not the standard rate, so Fast Mode cache rates are computed, not posted. On Opus 5.5 Fast Mode ($8/1M input) with Opus 5.5's own 0.05x cache-hit multiplier, and on Fable 5.2 Fast Mode ($16/1M input) with Fable 5.2's 0.025x:
+
+| Cache state | Multiplier | Opus 5.5 Fast Mode (per 1M input) | Fable 5.2 Fast Mode (per 1M input) |
+|-------------|:----------:|:---------------------------------:|:----------------------------------:|
+| 5-min cache write | 1.25x | $8 x 1.25 = **$10.00** | $16 x 1.25 = **$20.00** |
+| 1-hour cache write | 2x | $8 x 2 = **$16.00** | $16 x 2 = **$32.00** |
+| Cache hit | 0.05x on Opus 5.5, 0.025x on Fable 5.2 | $8 x 0.05 = **$0.40** | $16 x 0.025 = **$0.40** |
+
+Note that a cache hit on Opus 5.5 Fast Mode ($0.40/1M) costs double a standard Opus 5.5 hit ($0.20/1M): the premium multiplies through everything, cache discounts included. Fable 5.2 Fast Mode reads cache at the same $0.40, double its own standard $0.20, but its writes cost twice Opus 5.5 Fast's ($20.00 against $10.00 for 5 minutes, $32.00 against $16.00 for an hour). On Opus 5 and Opus 4.8 Fast Mode ($10/1M input, 0.1x hits) the same rows are $12.50, $20.00 and $1.00 -- a hit there costs the same as a cache **miss** on standard legacy Haiku 4.5 ($1.00/1M), and 10x a Haiku 5.5 miss up to 100K prompt tokens ($0.10/1M).
+
+The bigger trap: **switching between fast and standard speed invalidates the prompt cache.** Fast and standard requests use separate cache pools. If you toggle `speed` mid-session, your next turn pays full cache-write price on the entire accumulated prefix -- at Fast Mode rates if you switched to fast. In Claude Code, fast and standard speed keep separate caches, so each toggle can read the conversation uncached again, and so can the automatic fallback to standard speed after a rate limit and the return to fast mode later ([Claude Code prompt caching](https://code.claude.com/docs/en/prompt-caching), read 2026-11-01). Pick a speed at the start of a session and keep it. On Fable 5.2 that re-write costs twice what it does on Opus 5.5: re-writing a 100,000-token conversation at the Fast Mode 5-minute rate is $2.00 (computed: 100,000 x $20.00 / 1M), against $1.00 on Opus 5.5 Fast (100,000 x $10.00 / 1M).
+
+Fast Mode also draws from a **dedicated rate-limit pool** (surfaced in headers like `anthropic-fast-output-tokens-remaining`), separate from your standard limits. Opus 5.5 has a default fast mode rate limit in the Start, Build and Scale usage tiers, so it needs no access request ([fast mode docs](https://platform.claude.com/docs/en/build-with-claude/fast-mode), read 2026-11-01).
+
+### Compatibility Matrix
+
+| Surface / feature | Fast Mode works? |
+|-------------------|:----------------:|
+| Claude API (direct) | Yes: Fable 5.2 (no beta header), Mythos 5.2, Opus 5.5 (available); Opus 5 and Opus 4.8 (research preview, beta header; Opus 4.8 removal scheduled for 2026-11-30) |
+| Claude Managed Agents | Yes: Opus 5.5 (available); Opus 5 and Opus 4.8 (research preview) |
+| Claude Models on Google Cloud (Anthropic managed; the Google managed offering, formerly Vertex AI, is listed below) | Yes: Fable 5.2 and Opus 5.5 |
+| Microsoft Foundry | Yes: Fable 5.2, hosted on Anthropic as the separate model `claude-fable-5-2-fast`; Opus 5.5 on deployments hosted on Azure |
+| Claude Code | Yes on the Anthropic API or a subscription with usage credits turned on; Fable 5.2 needs v2.1.321+ and `/fast` while it is the model; **no** through Bedrock, Google Cloud's Agent Platform, Foundry or Claude Platform on AWS per the fast mode page (read 2026-11-10); the v2.1.322 changelog (2026-11-10) adds fast mode on Vertex in the global, us and eu regions, falling back to standard speed if Vertex refuses it |
+| Amazon Bedrock | **No** |
+| Claude Models on Google Cloud (Google managed, formerly Vertex AI) | Fable 5.2 only, at a price Google sets; **no** on the Opus models |
+| Claude Platform on AWS | **No** |
+| Batch API | **No** (they are opposite tradeoffs) |
+| Priority Tier | **No** |
+
+Sources: [fast mode docs](https://platform.claude.com/docs/en/build-with-claude/fast-mode), [pricing page](https://platform.claude.com/docs/en/about-claude/pricing#fast-mode-pricing) and [Claude Code fast mode](https://code.claude.com/docs/en/fast-mode), read 2026-11-10 (the Claude Code row's list of providers without Fast Mode was read 2026-11-01). Fast Mode runs on the Claude API and Managed Agents, plus Fable 5.2 and Opus 5.5 on Google Cloud (Anthropic managed), Fable 5.2 on Google Cloud (Google managed) at Google's price and on Foundry as `claude-fable-5-2-fast`, and Opus 5.5 on Foundry deployments hosted on Azure. If your traffic runs through Bedrock or Claude Platform on AWS, Fast Mode is not available to you at any price on any model; on Google Cloud (Google managed), only Fable 5.2 has it. In Claude Code, subscription users pay for Fast Mode with usage credits only (it is not included in plan limits).
+
+### When the 2x Is Worth It: Deadline Math
+
+Fast Mode is an economic decision: token premium versus the value of the time saved. The math is simple enough to run every time.
+
+**Worked example.** An engineer is blocked waiting on a long agentic run that will generate ~100K output tokens on Opus 5.5. (Legacy Opus 5 and Opus 4.8 cost more: $2.50 standard, $5.00 Fast, a $2.50 premium -- Fast Mode still wins there, by ~5.6x. On Fable 5.2 the same output is $4.00 standard and $8.00 Fast (100,000 x $40/1M and 100,000 x $80/1M), a $4.00 premium -- it wins by 3.5x (computed: $14.00 / $4.00).)
+
+```
+Standard Opus 5.5:
+  Output cost:  100,000 x $20/1M  = $2.00
+  Generation time at ~70 OTPS:    ~24 minutes
+
+Fast Mode Opus 5.5 (2x price, up to 2.5x OTPS):
+  Output cost:  100,000 x $40/1M  = $4.00
+  Generation time at ~175 OTPS:   ~10 minutes
+
+Premium paid:   $4.00 - $2.00 = $2.00
+Time saved:     ~14 minutes of blocked engineer time
+
+At a $60/hour loaded engineer cost:
+  14 minutes = $14.00 of engineer time
+  $14.00 saved > $2.00 premium  -->  Fast Mode wins by ~7x
+```
+
+(OTPS figures are illustrative -- the guarantee is "up to 2.5x," not a fixed rate. The premium above counts output only; input tokens are also billed at 2x ($8 vs $4 per 1M on Opus 5.5), and on context-heavy agentic runs the input premium can dominate. On Opus 5.5 there is a second complication: thinking is always on and thinking tokens are output tokens, so the same task produces more billable output than a thinking-off baseline did. Rerun the math with your observed throughput and full token mix.)
+
+The general rule:
+
+```
+Use Fast Mode when:
+  (minutes saved / 60) x (hourly cost of whoever is waiting)  >  (output tokens x fast premium)
+
+Fast premium on Opus 5.5 = an extra $20 per 1M output tokens (and $4 per 1M input).
+Fast premium on Opus 5 and Opus 4.8 = an extra $25 per 1M output tokens (and $5 per 1M input).
+Fast premium on Fable 5.2 and Mythos 5.2 = an extra $40 per 1M output tokens (and $8 per 1M input).
+```
+
+For a human actively blocked on the output, this clears easily. For anything else, it usually does not.
+
+### When It Is Not Worth It
+
+| Situation | Why Fast Mode loses | Use instead |
+|-----------|--------------------|-------------|
+| The task is simple enough for Haiku | Haiku 5.5 is faster **and** 40x cheaper per token than standard Opus 5.5 while the prompt stays at or under 100K tokens (8x above) -- strictly better than paying 2x on Opus | Route to Haiku 5.5 ([Guide 10](10-task-routing.md)) |
+| TTFT is the bottleneck | Fast Mode does not improve time-to-first-token | Warm cache, shorter context, lower effort |
+| Nobody is waiting (overnight runs, CI, scheduled jobs) | You are paying 2x to save time nobody experiences | Standard speed, or Batch API for 50% off ([Guide 06](06-access-methods-pricing.md)) |
+| You would run it on Opus 4.7, 4.6, or Opus 4.8 after 2026-11-30 | Fast Mode was removed on 4.7 and 4.6 (4.7 errors outright, 4.6 silently serves standard speed) and is scheduled for removal on Opus 4.8 on 2026-11-30 (then it errors) | Opus 5.5 if Fast Mode is truly needed (Fable 5.2 if the task needs Fable) |
+| The wait is mostly thinking on Opus 5.5 or Fable 5.2 | Fast Mode streams thinking tokens faster but bills the 2x premium on all of them | Lower `effort` (thinking can't be disabled on Opus 5.5 or Fable 5.2; on legacy Opus 5 it can, at effort high or below) |
+| Traffic runs through Bedrock or Claude Platform on AWS, through Google Cloud (Google managed) on any model but Fable 5.2, or Claude Code runs on any cloud provider | Not available | The free levers |
+| Session toggles speeds frequently | Fast and standard keep separate caches, so a switch can read the conversation uncached again; cache rewrites at fast rates ($10.00/1M for a 5-min write on Opus 5.5, $12.50 on Opus 5, $20.00 on Fable 5.2) erase the time savings | One speed per session |
+
+---
+
+### Opus 5.5 and the Always-On Thinking Tax
+
+Opus 5.5 cut the price -- $4/$20, 20% below Opus 5 -- but changed where your seconds and dollars go:
+
+**Thinking is ALWAYS on.** Adaptive thinking cannot be switched off on Opus 5.5: `thinking: {type: "disabled"}` and `thinking: {type: "enabled", budget_tokens}` both return a 400. Thinking tokens are billed as output at $20/1M and they are generated **before** your answer starts. If your Opus 5 integration disabled thinking to keep responses fast, the identical prompt now thinks first on Opus 5.5 -- the most likely "why did my latency regress after upgrading" cause.
+
+**The default effort dropped to `medium`.** Opus 5 defaulted to `high`. A request that omits effort now thinks less than it did on Opus 5, which pulls the other way. Re-baseline latency and cost after migrating instead of assuming either direction.
+
+**`max_tokens` is a hard cap on thinking plus text.** If you carried over a small `max_tokens`, thinking can consume the budget before the visible answer is written. In Anthropic's published runs, a 16,384-token cap ended about a quarter of Opus 5.5's attempts and 43% of Fable 5.1's; at 128,000 no Opus 5.5 turn hit the cap, and the longest ran about 61,000 tokens ([cost-optimization guide](https://platform.claude.com/docs/en/about-claude/models/optimizing-for-cost-and-intelligence)). Use 64,000 or more for agentic work.
+
+Your dial on Opus 5.5 is effort, and only effort:
+
+| Want | Do | Cost effect |
+|------|----|-------------|
+| Less thinking | Lower `output_config.effort` (defaults to `medium` on Opus 5.5) | Fewer output tokens, faster start |
+| No thinking at all | Not possible on Opus 5.5. Legacy Opus 5 accepts `thinking: {type: "disabled"}` **only at effort `high` or below** | Removes the thinking bill entirely (Opus 5 only) |
+
+On legacy Opus 5, pairing `thinking: {type: "disabled"}` with `xhigh` or `max` effort returns a **400 error**, so there is no way to buy maximum effort and skip thinking there either.
+
+One more thing worth auditing after an upgrade: prompts written for an older model make the new one over-work. In Anthropic's published runs, prompts written for Opus 4.8 cost 36% more per ticket on Opus 5 for no accuracy gain; audited, they were 14% cheaper and more accurate. Carried-over instructions like "double-check your answer" or "explain your reasoning step by step" pay for behavior the model already performs, and verbose output is billed output. Re-tune the prompt rather than assuming the old one is still cost-optimal.
+
+---
+
+## Latency by Model
+
+Model choice is itself a speed lever -- generally the strongest one after caching. Smaller models respond faster and cost less.
+
+| Model | Price (in/out per 1M) | Context | Max output | Latency class | Fast Mode | Speed-per-dollar takeaway |
+|-------|:---------------------:|:-------:|:----------:|---------------|:---------:|---------------------------|
+| **Haiku 5.5** | $0.10 / $0.50 up to 100K prompt tokens; $0.50 / $2.50 above | 1M | 128K | Fastest in the lineup; thinking on by default, default effort `medium` | No | Best speed AND best price -- the default for simple tasks, as long as prompts stay at or under 100K |
+| **Haiku 4.5** (legacy) | $1 / $5 | 200K | 64K | Fast (Haiku 5.5 is now the fastest) | No | Legacy. Haiku 5.5 is 10x cheaper per token up to 100K prompt tokens, ~7.7x per task after its ~30% larger token count (computed: 10 / 1.3; the 30% is from [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing)) |
+| **Sonnet 5.5** | $2 / $10 | 1M | 128K | Fast; thinking on by default, default effort `high` on the Claude API (`medium` in Claude Code) | No | Anthropic calls it "the best combination of speed and intelligence" -- the pick for standard dev work |
+| **Sonnet 5** (legacy) | $2 / $10 | 1M | 128K | Fast | No | Same price as Sonnet 5.5 -- no cost reason to stay |
+| **Opus 5.5** | $4 / $20 | 1M | 128K | Moderate; thinking always on, default effort `medium` | Yes (2x, $8 / $40) | The default Opus and the cheapest Fast Mode host; standard speed for most Opus work |
+| **Opus 5** | $5 / $25 | 1M | 128K | Moderate, and slower out of the box than 4.8 was (thinking is on by default) | Yes (2x, research preview) | Legacy. Opus 5.5 is 20% cheaper at both standard and Fast rates |
+| **Opus 4.8** | $5 / $25 | 1M | 128K | Moderate | Yes (2x, research preview; removal scheduled for 2026-11-30) | Legacy. Same price and same 2x Fast Mode as Opus 5 -- no speed or cost reason to stay, and its Fast Mode ends on 2026-11-30 |
+| **Fable 5.2** | $8 / $40 | 1M | 128K | Slower (always-on adaptive thinking; at `high` effort and above it thinks before almost every reply) | Yes (2x, $16 / $80) | Maximum capability; Anthropic still says to start with Opus 5.5 and move up when evals on Opus at higher effort fall short |
+| **Fable 5.1 / Fable 5** (legacy) | $10 / $50 | 1M | 128K | Slower (always-on adaptive thinking adds a pre-answer phase) | No | Legacy. Fable 5.2 is 20% cheaper per token and adds Fast Mode; here the speed levers are effort + caching only |
+
+**The strictly-better rule:** for any task Haiku 5.5 can handle, Haiku beats Opus Fast Mode on **both** axes -- it is faster (lowest latency in the lineup) and 80x cheaper per token than Opus 5.5 Fast Mode up to 100K prompt tokens ($0.10/$0.50 vs $8/$40), still 16x above ($0.50/$2.50), and 160x cheaper than Fable 5.2 Fast Mode ($16/$80) up to 100K (32x above). Paying a Fast Mode premium to speed up a task you could have routed down is the most expensive way to solve a routing problem.
+
+Fast Mode only enters the picture when the task genuinely needs Opus-level (or Fable-level) capability **and** output speed matters. That intersection is narrow.
+
+One tokenizer note: Fable 5.2, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Fable 5.1, Fable 5, Sonnet 5.5, Sonnet 5, and Haiku 5.5 all use the newer tokenizer, which produces about 30% more tokens for the same text than pre-4.7 models ([Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing); Haiku 5.5: ~30% more than Haiku 4.5). More tokens means proportionally more generation time and cost -- factor it into any throughput comparison against older benchmarks. Opus 5.5 and Opus 5 share the Opus 4.7-generation tokenizer exactly, so migrating from 4.7 or later needs no token re-baselining (thinking and effort defaults are a separate re-baseline).
+
+---
+
+## Thinking and Effort as a Speed Lever
+
+Thinking tokens are billed as output tokens, and they are generated **before** your answer starts. Every thinking token you do not need is latency and money saved simultaneously.
+
+| Model | Thinking behavior | Control |
+|-------|-------------------|---------|
+| **Opus 5.5** | Adaptive thinking, **always on** -- `thinking: {type: "disabled"}` and `budget_tokens` both return 400; `effort` defaults to **medium** | `effort` is the only control; in Claude Code, changing it keeps the prompt cache (API key or subscription; not on Bedrock, Google Cloud's Agent Platform, a Claude apps gateway or a HIPAA configuration) |
+| **Fable 5.2** | Adaptive thinking, **always on** -- `thinking: {type: "disabled"}` and `budget_tokens` return 400; `effort` defaults to **high** on the API and **medium** in Claude Code; at `high` and above it thinks before almost every reply | `effort` (all five levels; per-message effort, beta on the Claude API, keeps the prompt cache); in Claude Code, effort changes keep the cache under the same conditions as Opus 5.5 |
+| **Fable 5.1 / Fable 5** (legacy) | Adaptive thinking, **always on** -- `thinking: {type: "disabled"}` is not supported; `effort` defaults to **high** on Fable 5.1 | `effort` parameter controls depth (in Claude Code, effort changes keep the cache on Fable 5.1 under the same conditions as Opus 5.5) |
+| **Opus 5** (legacy) | Adaptive thinking, **on by default** when you omit the `thinking` param; `effort` defaults to **high** | Lower `effort`, or `thinking: {type: "disabled"}` at effort high or below (400 at xhigh/max) |
+| **Opus 4.8** | Adaptive thinking, **off** unless you ask for it; `effort` defaults to **high** on all surfaces | Lower `effort` explicitly for routine work |
+| **Sonnet 5.5** | Adaptive thinking, **on by default**; `effort` defaults to **high** on the Claude API (Claude Code starts Sonnet 5.5 at **medium**) and is recalibrated versus Sonnet 5; `thinking: {type: "disabled"}` and `budget_tokens` return 400 | `thinking: {type: "between_tools"}` turns off up-front thinking (accepted only at `low`, `medium` and `high` effort); re-run your effort sweep instead of carrying Sonnet 5's setting over |
+| **Sonnet 5** (legacy) | Adaptive thinking; `effort` defaults to **high** on the Claude API and Claude Code | Lower `effort` for routine work |
+| **Haiku 5.5** | Adaptive thinking, **on by default**; `effort` defaults to **medium**; manual `budget_tokens` returns 400 | Lower `effort`; on the API, `thinking: {type: "disabled"}` still works at `high` effort or below; Claude Code cannot turn thinking off on Haiku 5.5 |
+
+Practical implications:
+
+- **On Opus 5.5, effort is the only dial.** Thinking can't be disabled, but the default is already `medium`, so a request that omits effort thinks less than it did on Opus 5. In Claude Code, changing effort mid-session keeps the cache on Fable 5.1 and later (Fable 5.2 included), Opus 5.5, Sonnet 5.5 and Haiku 5.5 with an API key or a subscription (not on Amazon Bedrock, Google Cloud's Agent Platform or a Claude apps gateway, with `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`, or under a HIPAA configuration), so you can drop to `low` for a routine stretch without paying a cache rebuild ([Claude Code prompt caching](https://code.claude.com/docs/en/prompt-caching), "Changing effort level", read 2026-11-10). On your own API calls, a top-level `effort` change invalidates the cache; Anthropic measured it at 20 to 40 times the cost of changing effort per message on a cached conversation of about 100,000 tokens ([cost-optimization guide](https://platform.claude.com/docs/en/about-claude/models/optimizing-for-cost-and-intelligence), "What breaks the cache", read 2026-11-01).
+- **On legacy Opus 5, the default costs you both speed and money.** Thinking is on unless you disable it, and effort starts at high. The same request that returned straight text on Opus 4.8 generates a thinking phase first, billed as output at $25/1M. For routine tasks, lower effort or disable thinking outright.
+- **On Opus 4.8, the default costs you speed.** Effort defaults to high everywhere. For routine tasks (renames, small edits, formatting-adjacent work), lowering effort cuts thinking tokens, which cuts both the pre-answer wait and the output bill.
+- **On Sonnet 5.5, `between_tools` is the lowest thinking setting.** `thinking: {type: "disabled"}` returns 400, and reasoning bills as output at $10/1M. To stop up-front thinking on routine turns, send `thinking: {type: "between_tools"}` at `high` effort or below (it is rejected at `xhigh` and `max`). Effort levels are recalibrated, so the setting you tuned on Sonnet 5 does not carry over; Anthropic's starting points are `high` in general and `medium` for well-specified agentic coding and multistep tool use.
+- **On Haiku 5.5, thinking is on by default but the API can still switch it off.** `thinking: {type: "disabled"}` works at `high` effort or below (manual `budget_tokens` returns 400); in Claude Code it cannot be turned off, so lower effort there instead. Reasoning bills as output at $0.50/1M up to 100K prompt tokens ($2.50 above).
+- **On Fable 5.2, Fable 5.1 and Fable 5, effort is your only thinking dial.** You cannot turn thinking off. On Fable 5.2, a prompt line asking for less thinking does not stop it thinking at `medium` or above, at `high` and above it thinks before almost every reply, and at `low` and `medium` a turn can end early; Claude Code starts it at `medium`, the API at `high` (Anthropic's testing, [what's new in Fable 5.2](https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2), read 2026-11-10). If Fable feels slow, check whether the task justifies high effort before assuming you need a different model.
+- **In Claude Code, `ultrathink` buys one `xhigh` turn.** Typing `ultrathink` in the terminal prompt raises that turn to `xhigh` effort on Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.2 and Fable 5.1 through Anthropic's API (v2.1.311+; Fable 5.2 needs v2.1.321+; [model config](https://code.claude.com/docs/en/model-config), read 2026-11-10) without changing your session effort; `CLAUDE_CODE_DISABLE_ULTRATHINK` turns the keyword off (v2.1.316). It is the opposite of the speed lever: `xhigh` cost 2.5x `high` per task on Opus 5.5 SWE-bench Pro, so keep it for the one hard turn. The `maxEffortLevel` setting caps effort on any plan and provider ([model-config](https://code.claude.com/docs/en/model-config), [changelog](https://code.claude.com/docs/en/changelog), read 2026-11-01).
+- **In Claude Code, set effort per model, and know what a settings value does.** `/effort` and the `/model` picker save a level per model (under `modelSettings`). A top-level `effortLevel` in your user settings does not apply to Opus 5.5 and newer, so it will not lower Opus 5.5 below its `medium` default; in project, local or managed settings, or with `--settings`, it applies to every model. `effortLevel` and `modelSettings` accept `low`, `medium`, `high` or `xhigh`; `max` is session-only (the `--effort` flag, `/effort`, or `CLAUDE_CODE_EFFORT_LEVEL`) ([model-config](https://code.claude.com/docs/en/model-config), read 2026-11-01).
+- **What Anthropic measured (published runs, directional, not guarantees).** On research work (Fable 5.1 on DeepResearch Bench II), `low` scored 60.5% at $3.47 a task, `medium` 60.5% at $4.44 and `high` (the default) 63.0% at $5.64: `medium` was 2.5 points below the default at 79% of its cost (computed: 4.44 / 5.64), and `low` was 2.5 points below for 38% less (computed: 1 - 3.47 / 5.64). On SWE-bench Pro, Opus 5.5 at `medium` scored about 2.5 points below `high` for about 70% of the cost; `low` scored about 8 points below for 38% of the cost (computed: 0.11 / 0.29), and `xhigh` 1.4 points above for 2.5x the cost of `high`. Running at `low` and re-running only the failures at `high` passed about 97% for about $0.17 per task, versus 95.3% for $0.29 running everything at `high` ([cost-optimization guide](https://platform.claude.com/docs/en/about-claude/models/optimizing-for-cost-and-intelligence), "Tune effort", read 2026-11-01).
+- **This lever removes tokens instead of streaming them faster.** Thinking happens before your visible answer, so heavy thinking feels like a slow start even though it is output generation under the hood. Fast Mode may stream thinking tokens faster, but you pay the premium on every one of them; lowering effort deletes them entirely -- faster AND cheaper.
+
+Rule of thumb: match effort to task difficulty the same way you match model to task tier ([Guide 10](10-task-routing.md)). High effort on a trivial task wastes seconds and dollars on every single turn.
+
+---
+
+## Caching as a Latency Tool
+
+[Guide 08](08-prompt-caching.md) covers prompt caching as a cost lever (90% off cached input on most models, 95% on Opus 5.5 and Sonnet 5.5, 97.5% on Fable 5.2 and Fable 5.1). It is equally a **latency** lever: Anthropic publishes up to **85% latency reduction** for long prompts served from cache, because the cached prefix is not reprocessed at all ([Anthropic, 2025-08-14](https://claude.com/resources/articles/prompt-caching), read 2026-11-01; its 100K-token example went from 11.5s to 2.4s).
+
+Cache hits primarily improve TTFT -- exactly the bottleneck Fast Mode cannot fix. In a typical Claude Code session, the system prompt, CLAUDE.md, tool schemas, and conversation history form a long stable prefix. When that prefix is a cache hit, the model starts responding almost immediately instead of re-reading tens of thousands of tokens first.
+
+The same hygiene that maximizes cache savings maximizes speed:
+
+- Keep turns inside the cache TTL (5 minutes on an API key, a cloud provider or usage credits; 1 hour on a subscription's main conversation; subagents get 5 minutes by default). On your own API calls, the 5-minute default cost about 19% less than the 1-hour cache on Sonnet 5.5 and about 15% to 18% less on Opus 5.5 with no pauses; the 1-hour cache wins once about 1 turn in 20 follows a 5-to-60-minute pause ([cost-optimization guide](https://platform.claude.com/docs/en/about-claude/models/optimizing-for-cost-and-intelligence), "Pick the cache duration", read 2026-11-01; details in [Guide 08](08-prompt-caching.md#extended-ttl-economics)).
+- Do not switch models mid-session, and change effort only where Claude Code keeps the cache (Fable 5.1 and later, Opus 5.5, Sonnet 5.5 and Haiku 5.5 with an API key or a subscription; see the thinking table above). (Editing CLAUDE.md mid-session does not break the cache; it applies after `/clear`, `/compact`, or restart.)
+- Do not toggle Fast Mode mid-session -- separate cache pools, so each toggle can read the conversation uncached again.
+
+A warm cache is the single cheapest latency win available: you get up to 85% faster starts **while paying 90% less for the cached tokens (95% on Opus 5.5 and Sonnet 5.5, 97.5% on Fable 5.2 and Fable 5.1)**. Nothing else on this page has that sign on both axes.
+
+---
+
+## The Inverse Lever: Batch API When Speed Does Not Matter
+
+Speed optimization has a mirror image: when latency does not matter at all, stop paying for it.
+
+The Batch API is the opposite tradeoff from Fast Mode: **50% off both input and output tokens** in exchange for asynchronous processing with up to a 24-hour turnaround (most batches finish much sooner). Fast Mode and Batch are mutually exclusive by design -- they are the two ends of the same dial.
+
+| Workload | Right end of the dial | Price vs standard |
+|----------|----------------------|:-----------------:|
+| Engineer actively blocked on long output | Fast Mode (Opus 5.5) | 2x |
+| Interactive session, human in the loop | Standard | 1x |
+| Overnight doc generation, bulk classification, eval runs, migration sweeps | Batch API | **0.5x** |
+
+If a job runs while nobody watches, putting it on Batch instead of Fast Mode is a 4x price difference on Opus 5.5 (0.5x vs 2x) for zero experienced slowdown -- $2/$10 per 1M on Batch versus $8/$40 on Fast Mode. On Fable 5.2 it is the same 4x: $4/$20 on Batch versus $16/$80 on Fast Mode. Batch also unlocks 300K max output on Opus 5.5 via the `output-300k-2026-03-24` beta, which Fast Mode cannot do at any price. See [Guide 06](06-access-methods-pricing.md) for Batch API mechanics and [Guide 08](08-prompt-caching.md) for how caching interacts with batched workloads.
+
+---
+
+## Decision Table: "I Need It Faster"
+
+Work top to bottom. Stop at the first row that applies -- the levers are ordered so the free fixes come first.
+
+| Symptom | Diagnosis | Lever | Cost impact |
+|---------|-----------|-------|:-----------:|
+| Nobody is actually waiting on this | You do not have a speed problem | Batch API ([Guide 06](06-access-methods-pricing.md)) | **-50%** |
+| Slow start, long pause before first token | Cold cache or oversized context | Warm the cache; turns inside the TTL; keep model and effort fixed mid-session; check `/usage` for the `Prompt cache (main)` line ([Guide 08](08-prompt-caching.md)) | Cheaper (0.1x on hits, less on Opus 5.5 / Sonnet 5.5 / Fable 5.2 / Fable 5.1) |
+| Still slow to start, cache is warm | Context bloat | `/compact`, fresh session, trim CLAUDE.md, `permissions.deny` `Read(...)` rules ([Guide 02](02-context-optimization.md)) | Cheaper |
+| Latency regressed after moving from Opus 5 to Opus 5.5 | You had thinking disabled on Opus 5; Opus 5.5 always thinks | Lower `effort` (thinking can't be disabled on Opus 5.5) | Cheaper (fewer billed thinking tokens) |
+| Slow start on Fable 5.2 / Fable 5.1 / Opus 5.5 / Opus 5 / Opus 4.8, small context | Thinking-heavy startup | Lower `effort` for routine tasks | Cheaper |
+| Task is simple (rename, boilerplate, summary, syntax) | Over-modeled | Route to Haiku 5.5 -- faster AND 40x cheaper per token than Opus 5.5 while the prompt stays at or under 100K tokens (8x above) | **-97.5% vs Opus 5.5** (-87.5% above 100K) |
+| Task is standard dev work on Opus | Over-modeled | Route to Sonnet 5.5 ($2/$10) | **-50% vs Opus 5.5** |
+| Long output streams too slowly, task truly needs Opus, a human is blocked, deadline math clears | The one Fast Mode case | Fast Mode on **Opus 5.5** ($8/$40, the cheapest Fast Mode; 4.7 errors, 4.6 silently ignores it), or on Fable 5.2 ($16/$80) only when the task needs Fable; one speed for the whole session | **+100%** |
+| All of the above and you are on Bedrock or Claude Platform on AWS, or on Google Cloud (Google managed) with any model but Fable 5.2 | Fast Mode unavailable | Back to the free levers; consider Claude API direct if the case is chronic | -- |
+
+---
+
+## Key Takeaways
+
+1. **Speed and cost are usually allies, not enemies.** Cache warmth, shorter context, model routing, and effort control all make sessions faster AND cheaper. Fast Mode is the only speed lever that costs extra -- reach for it last.
+
+2. **Diagnose TTFT vs OTPS before spending anything.** Fast Mode only accelerates output streaming (up to 2.5x OTPS). If your pain is the wait before tokens appear, the fix is caching (up to 85% latency reduction), smaller context, or lower effort -- all free or cheaper.
+
+3. **For tasks Haiku can do, Haiku beats Fast Mode on both speed and cost.** Haiku 5.5 has the lowest latency in the lineup at $0.10/$0.50 up to 100K prompt tokens -- 80x cheaper per token than Opus 5.5 Fast Mode ($8/$40), and still 16x cheaper above 100K ($0.50/$2.50). Routing down is strictly better than paying up.
+
+4. **Fast Mode is a flat 2x on Fable 5.2 and Mythos 5.2 ($16/$80), Opus 5.5 ($8/$40), Opus 5 and Opus 4.8 ($10/$50), and unavailable on every other model, Fable 5.1 included.** Opus 5.5 Fast is the cheapest and is generally available. Fable 5.2 and Opus 5.5 are the ones that also run on Google Cloud (Anthropic managed) and Foundry (Fable 5.2 hosted on Anthropic as `claude-fable-5-2-fast`, Opus 5.5 hosted on Azure), and Fable 5.2 alone runs on Google Cloud (Google managed), where Google sets the price; Opus 4.8 Fast Mode will be removed on 2026-11-30. The 6x tier is gone: Opus 4.7 errors on `speed: "fast"`, and Opus 4.6 accepts it but silently serves standard speed at standard rates. Check `usage.speed` in the response if you suspect a pipeline is still asking for Fast Mode on a model that no longer honors it.
+
+5. **Run the deadline math.** Fast Mode pays off when (engineer time saved) > (token premium). For a blocked human on a 100K-token output, ~$2.00 of premium on Opus 5.5 (~$4.00 on Fable 5.2) buys ~14 minutes -- an easy win. For unattended jobs, it buys nothing.
+
+6. **Never toggle speeds mid-session.** Fast and standard use separate cache pools; a switch can read the conversation uncached again and force full-price rewrites at the new speed's rates ($10.00/1M for a 5-min write on Opus 5.5 Fast Mode, $12.50 on Opus 5, $20.00 on Fable 5.2).
+
+7. **Effort is the thinking-speed dial.** On Opus 5.5 and the Fable models thinking is always on and effort is the only control; Opus 5.5 defaults to `medium` (Opus 5 defaulted to `high`), and Fable 5.2 to `high` on the API and `medium` in Claude Code. Lowering `effort` cuts thinking tokens, which cuts both latency and output cost, and in Claude Code on Fable 5.1 and later, Opus 5.5, Sonnet 5.5 and Haiku 5.5 (API key or subscription) the change keeps your prompt cache. Only legacy Opus 5 and, on the API, Haiku 5.5 still accept `thinking: {type: "disabled"}`, and only at effort high or below -- pairing it with xhigh or max returns a 400 on Opus 5.
+
+8. **When nobody is waiting, flip the dial the other way.** Batch API is 50% off for async workloads -- a 4x price difference versus Fast Mode on Opus 5.5 ($2/$10 versus $8/$40) and on Fable 5.2 ($4/$20 versus $16/$80) for jobs that run overnight anyway.
+
+---
+
+*Previous: [Guide 10 - Three-Tier Task Routing](10-task-routing.md)*
